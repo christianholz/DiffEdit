@@ -1,0 +1,63 @@
+name: DiffEdit
+
+options:
+  bundleIdPrefix: local.diffedit
+  deploymentTarget:
+    macOS: "13.0"
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    CLANG_ENABLE_MODULES: YES
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    SWIFT_VERSION: "5.0"
+
+targets:
+  DiffEdit:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/DiffEdit
+    settings:
+      base:
+        CODE_SIGN_STYLE: Automatic
+        CURRENT_PROJECT_VERSION: "1"
+        ENABLE_HARDENED_RUNTIME: YES
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: DiffEdit
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        MARKETING_VERSION: "0.1.0"
+        PRODUCT_BUNDLE_IDENTIFIER: local.diffedit.app
+        PRODUCT_NAME: DiffEdit
+
+  DiffEditTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/DiffEditTests
+    dependencies:
+      - target: DiffEdit
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: local.diffedit.tests
+
+schemes:
+  DiffEdit:
+    build:
+      targets:
+        DiffEdit: all
+        DiffEditTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - DiffEditTests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

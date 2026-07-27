@@ -1,0 +1,436 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0569B1531388B7A6469D049A /* DiffEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 557BAD1D6445BFD029234BF4 /* DiffEngine.swift */; };
+		13F7AE02473E0ED2865EBBD2 /* Application.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0CD4275C958E0E1D7507260 /* Application.swift */; };
+		26F73ADB5FFB9794997BAB3D /* EditorViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4334ADE21DDB0F527112B71F /* EditorViews.swift */; };
+		6E99DE1076A440270937F0DA /* EditorBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A39698F0CFD632B9FC3BBB39 /* EditorBuffer.swift */; };
+		8257048E54DCD5CF518E8AE6 /* EditorTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 745D1834BA5D419F3E4C889D /* EditorTheme.swift */; };
+		C53FC33A55A7EF9A117E89CF /* TextUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C18FA256390854BF7B49506 /* TextUtilities.swift */; };
+		C5C66F22A7C221068D7BFBAA /* EditorViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 483EB6023A423720097CCCDE /* EditorViewController.swift */; };
+		E2A80F4FE25070331BE79A7C /* Sidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4BBB585E46E0C049FB8C17D /* Sidebar.swift */; };
+		E9B811A27C989CABEFC8CAB3 /* QuickOpen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 769C7B4F47F4F5983068BFA9 /* QuickOpen.swift */; };
+		F2B209F2E5E47E7B0CAF4FB4 /* DiffEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96A092B676E123389F1B625A /* DiffEngineTests.swift */; };
+		FF01389DDA6D5859C3F54B2C /* Repository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 795E3AC7D2342D258B027D79 /* Repository.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		58738D436A88B2E3F605C7D2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6C06911AEA39D1AC8A683CAD /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FFBE6C139C7022ED27A7DA58;
+			remoteInfo = DiffEdit;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		4334ADE21DDB0F527112B71F /* EditorViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorViews.swift; sourceTree = "<group>"; };
+		483EB6023A423720097CCCDE /* EditorViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorViewController.swift; sourceTree = "<group>"; };
+		4C18FA256390854BF7B49506 /* TextUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextUtilities.swift; sourceTree = "<group>"; };
+		557BAD1D6445BFD029234BF4 /* DiffEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffEngine.swift; sourceTree = "<group>"; };
+		745D1834BA5D419F3E4C889D /* EditorTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTheme.swift; sourceTree = "<group>"; };
+		769C7B4F47F4F5983068BFA9 /* QuickOpen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickOpen.swift; sourceTree = "<group>"; };
+		795E3AC7D2342D258B027D79 /* Repository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Repository.swift; sourceTree = "<group>"; };
+		96A092B676E123389F1B625A /* DiffEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffEngineTests.swift; sourceTree = "<group>"; };
+		A39698F0CFD632B9FC3BBB39 /* EditorBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorBuffer.swift; sourceTree = "<group>"; };
+		BB41BC0CE0797A16A4AB5A9C /* DiffEditTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DiffEditTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C7D3472AD0BBF7EAE72C6268 /* DiffEdit.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DiffEdit.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D0CD4275C958E0E1D7507260 /* Application.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Application.swift; sourceTree = "<group>"; };
+		F4BBB585E46E0C049FB8C17D /* Sidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sidebar.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		066E018A1D853242F6D697FB /* DiffEditTests */ = {
+			isa = PBXGroup;
+			children = (
+				96A092B676E123389F1B625A /* DiffEngineTests.swift */,
+			);
+			name = DiffEditTests;
+			path = Tests/DiffEditTests;
+			sourceTree = "<group>";
+		};
+		87AAE54663C9E705D7457BB7 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C7D3472AD0BBF7EAE72C6268 /* DiffEdit.app */,
+				BB41BC0CE0797A16A4AB5A9C /* DiffEditTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		891AEFE7C145BB42097AB23D /* DiffEdit */ = {
+			isa = PBXGroup;
+			children = (
+				D0CD4275C958E0E1D7507260 /* Application.swift */,
+				557BAD1D6445BFD029234BF4 /* DiffEngine.swift */,
+				A39698F0CFD632B9FC3BBB39 /* EditorBuffer.swift */,
+				745D1834BA5D419F3E4C889D /* EditorTheme.swift */,
+				483EB6023A423720097CCCDE /* EditorViewController.swift */,
+				4334ADE21DDB0F527112B71F /* EditorViews.swift */,
+				769C7B4F47F4F5983068BFA9 /* QuickOpen.swift */,
+				795E3AC7D2342D258B027D79 /* Repository.swift */,
+				F4BBB585E46E0C049FB8C17D /* Sidebar.swift */,
+				4C18FA256390854BF7B49506 /* TextUtilities.swift */,
+			);
+			name = DiffEdit;
+			path = Sources/DiffEdit;
+			sourceTree = "<group>";
+		};
+		DAC9752DAE4C985F6E9712E6 = {
+			isa = PBXGroup;
+			children = (
+				891AEFE7C145BB42097AB23D /* DiffEdit */,
+				066E018A1D853242F6D697FB /* DiffEditTests */,
+				87AAE54663C9E705D7457BB7 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		D8C48E6EFB056A320FB28B7D /* DiffEditTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A26B43AD58FDB12DF8056144 /* Build configuration list for PBXNativeTarget "DiffEditTests" */;
+			buildPhases = (
+				D88C19CC050A13906A0DB337 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				DD559BF608AF20B5A3C6AD26 /* PBXTargetDependency */,
+			);
+			name = DiffEditTests;
+			packageProductDependencies = (
+			);
+			productName = DiffEditTests;
+			productReference = BB41BC0CE0797A16A4AB5A9C /* DiffEditTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		FFBE6C139C7022ED27A7DA58 /* DiffEdit */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC67ADD0809210A7C663A2A5 /* Build configuration list for PBXNativeTarget "DiffEdit" */;
+			buildPhases = (
+				70115126B1C8B8818D68F921 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DiffEdit;
+			packageProductDependencies = (
+			);
+			productName = DiffEdit;
+			productReference = C7D3472AD0BBF7EAE72C6268 /* DiffEdit.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		6C06911AEA39D1AC8A683CAD /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					FFBE6C139C7022ED27A7DA58 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = C9A8DCF465C2C90F3521A483 /* Build configuration list for PBXProject "DiffEdit" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = DAC9752DAE4C985F6E9712E6;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 87AAE54663C9E705D7457BB7 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				FFBE6C139C7022ED27A7DA58 /* DiffEdit */,
+				D8C48E6EFB056A320FB28B7D /* DiffEditTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		70115126B1C8B8818D68F921 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				13F7AE02473E0ED2865EBBD2 /* Application.swift in Sources */,
+				0569B1531388B7A6469D049A /* DiffEngine.swift in Sources */,
+				6E99DE1076A440270937F0DA /* EditorBuffer.swift in Sources */,
+				8257048E54DCD5CF518E8AE6 /* EditorTheme.swift in Sources */,
+				C5C66F22A7C221068D7BFBAA /* EditorViewController.swift in Sources */,
+				26F73ADB5FFB9794997BAB3D /* EditorViews.swift in Sources */,
+				E9B811A27C989CABEFC8CAB3 /* QuickOpen.swift in Sources */,
+				FF01389DDA6D5859C3F54B2C /* Repository.swift in Sources */,
+				E2A80F4FE25070331BE79A7C /* Sidebar.swift in Sources */,
+				C53FC33A55A7EF9A117E89CF /* TextUtilities.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D88C19CC050A13906A0DB337 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F2B209F2E5E47E7B0CAF4FB4 /* DiffEngineTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		DD559BF608AF20B5A3C6AD26 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = FFBE6C139C7022ED27A7DA58 /* DiffEdit */;
+			targetProxy = 58738D436A88B2E3F605C7D2 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		48D90D8AB785ECA7487A8D1D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		793AF3CE68323E84B6D0CB4F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		95369FA02A14FAAA39AA8F2A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = local.diffedit.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DiffEdit.app/Contents/MacOS/DiffEdit";
+			};
+			name = Release;
+		};
+		C0F554425C84110EAB30F11E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = DiffEdit;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.diffedit.app;
+				PRODUCT_NAME = DiffEdit;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		D75B02D133D5FD3D37DFB59B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = local.diffedit.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DiffEdit.app/Contents/MacOS/DiffEdit";
+			};
+			name = Debug;
+		};
+		E105DC501480E295BCA496E9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = DiffEdit;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.diffedit.app;
+				PRODUCT_NAME = DiffEdit;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A26B43AD58FDB12DF8056144 /* Build configuration list for PBXNativeTarget "DiffEditTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D75B02D133D5FD3D37DFB59B /* Debug */,
+				95369FA02A14FAAA39AA8F2A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C9A8DCF465C2C90F3521A483 /* Build configuration list for PBXProject "DiffEdit" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				793AF3CE68323E84B6D0CB4F /* Debug */,
+				48D90D8AB785ECA7487A8D1D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		CC67ADD0809210A7C663A2A5 /* Build configuration list for PBXNativeTarget "DiffEdit" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E105DC501480E295BCA496E9 /* Debug */,
+				C0F554425C84110EAB30F11E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 6C06911AEA39D1AC8A683CAD /* Project object */;
+}
