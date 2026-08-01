@@ -304,8 +304,14 @@ final class WindowController: NSWindowController, NSWindowDelegate {
 final class MainViewController: NSSplitViewController, AppCommands {
     private let sidebar = SidebarViewController()
     private let editor = EditorViewController()
+    private let activationRefreshQueue = DispatchQueue(
+        label: "com.diffedit.window-refresh",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
     private var repository: Repository?
     private var quickOpenController: QuickOpenController?
+    private var activationRefreshGeneration = 0
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -427,6 +433,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
     }
 
     func refreshRepositoryStatus() {
+        invalidateActivationRefresh()
         repository?.refreshStatus()
         if let repository {
             sidebar.setCurrentBranchName(repository.currentBranchName)
@@ -435,22 +442,53 @@ final class MainViewController: NSSplitViewController, AppCommands {
     }
 
     func captureBeforeResigningKey() {
+        invalidateActivationRefresh()
         editor.captureForegroundState()
     }
 
     func refreshAfterBecomingKey() {
         guard let repository else { return }
-        repository.refreshStatus()
-        sidebar.setCurrentBranchName(repository.currentBranchName)
-        sidebar.load(root: repository.makeTree(), preservingSelection: editor.currentDocumentPath)
-        do {
-            try editor.refreshCurrentFileFromDisk(using: repository)
-        } catch {
-            presentError(error, title: "Couldn’t Refresh File")
+        invalidateActivationRefresh()
+        let generation = activationRefreshGeneration
+        let fileRequest = editor.foregroundFileRefreshRequest()
+        activationRefreshQueue.async { [weak self, weak repository] in
+            guard let self, let repository else { return }
+            let status = repository.statusSnapshot()
+            let fileRefresh: Result<PreparedForegroundFileRefresh?, Error> = Result {
+                guard let fileRequest else { return nil as PreparedForegroundFileRefresh? }
+                return try PreparedForegroundFileRefresh.load(
+                    request: fileRequest,
+                    repository: repository
+                )
+            }
+            DispatchQueue.main.async { [weak self, weak repository] in
+                guard let self,
+                      let repository,
+                      self.repository === repository,
+                      self.activationRefreshGeneration == generation,
+                      self.view.window?.isKeyWindow == true else { return }
+                repository.apply(status)
+                self.sidebar.setCurrentBranchName(status.branchName)
+                self.sidebar.load(
+                    root: status.tree,
+                    preservingSelection: self.editor.currentDocumentPath
+                )
+                switch fileRefresh {
+                case let .success(prepared):
+                    if let prepared {
+                        _ = self.editor.apply(prepared)
+                    } else {
+                        self.editor.finishForegroundRefreshWithoutFileChange(fileRequest)
+                    }
+                case let .failure(error):
+                    self.presentError(error, title: "Couldn’t Refresh File")
+                }
+            }
         }
     }
 
     func loadFolder(_ url: URL) {
+        invalidateActivationRefresh()
         let repo = Repository(rootURL: url)
         repository = repo
         repo.refreshStatus()
@@ -468,12 +506,14 @@ final class MainViewController: NSSplitViewController, AppCommands {
     @discardableResult
     private func openFile(relativePath: String, url: URL) -> Bool {
         guard let repository else { return false }
+        invalidateActivationRefresh()
         if editor.isEditing(relativePath: relativePath) {
             sidebar.selectFile(relativePath: relativePath)
             return true
         }
         do {
             guard try editor.open(file: url, relativePath: relativePath, repository: repository, onSaved: { [weak self] in
+                self?.invalidateActivationRefresh()
                 self?.repository?.refreshStatus()
                 if let repository = self?.repository {
                     self?.sidebar.load(root: repository.makeTree(), preservingSelection: relativePath)
@@ -489,6 +529,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
 
     private func navigateChange(_ direction: ChangeNavigationDirection) {
         guard let repository else { return }
+        invalidateActivationRefresh()
         if editor.navigateToAdjacentChange(direction, animated: true) {
             return
         }
@@ -512,6 +553,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
 
     private func stageSelectedChanges() {
         guard let repository else { return }
+        invalidateActivationRefresh()
         do {
             try editor.stageSelectedChanges(using: repository)
             repository.refreshStatus()
@@ -524,6 +566,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
 
     private func commit(message: String) {
         guard let repository else { return }
+        invalidateActivationRefresh()
         do {
             guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw RepositoryError.emptyCommitMessage
@@ -552,6 +595,10 @@ final class MainViewController: NSSplitViewController, AppCommands {
         let alert = NSAlert(error: error)
         alert.messageText = title
         alert.runModal()
+    }
+
+    private func invalidateActivationRefresh() {
+        activationRefreshGeneration &+= 1
     }
 
     private func resolveExternalFileConflict(_ conflict: ExternalFileConflict) -> ExternalFileResolution {

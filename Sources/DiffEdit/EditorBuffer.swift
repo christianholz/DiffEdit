@@ -1,6 +1,55 @@
 import AppKit
 import Foundation
 
+struct ForegroundFileRefreshRequest {
+    let relativePath: String
+    let url: URL
+    let knownDiskModificationDate: Date?
+}
+
+struct PreparedForegroundFileRefresh {
+    let request: ForegroundFileRefreshRequest
+    let diskText: String?
+    let diskModificationDate: Date?
+    let committedText: String
+
+    static func load(
+        request: ForegroundFileRefreshRequest,
+        repository: Repository
+    ) throws -> PreparedForegroundFileRefresh? {
+        let observedModificationDate = try DiskFileReader.modificationDate(at: request.url)
+        guard observedModificationDate != request.knownDiskModificationDate else { return nil }
+        let observedDisk = try DiskFileReader.snapshot(at: request.url)
+        return PreparedForegroundFileRefresh(
+            request: request,
+            diskText: observedDisk.text,
+            diskModificationDate: observedDisk.modificationDate,
+            committedText: repository.committedText(relativePath: request.relativePath) ?? ""
+        )
+    }
+}
+
+struct DiskFileSnapshot {
+    let text: String?
+    let modificationDate: Date?
+}
+
+enum DiskFileReader {
+    static func modificationDate(at url: URL) throws -> Date? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return attributes[.modificationDate] as? Date
+    }
+
+    static func snapshot(at url: URL) throws -> DiskFileSnapshot {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return DiskFileSnapshot(text: nil, modificationDate: nil)
+        }
+        let text = try String(contentsOf: url, encoding: .utf8)
+        return DiskFileSnapshot(text: text, modificationDate: try modificationDate(at: url))
+    }
+}
+
 struct EditorBuffer {
     let url: URL
     let relativePath: String

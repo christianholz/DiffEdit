@@ -22,6 +22,12 @@ enum RepositoryError: LocalizedError {
     }
 }
 
+struct RepositoryStatusSnapshot {
+    let unstagedPaths: Set<String>
+    let branchName: String
+    let tree: FileNode
+}
+
 final class Repository {
     let rootURL: URL
     private let gitRootURL: URL
@@ -45,10 +51,23 @@ final class Repository {
     }
 
     func refreshStatus() {
+        apply(statusSnapshot())
+    }
+
+    func statusSnapshot() -> RepositoryStatusSnapshot {
         let modified = runGit(arguments: ["diff", "--name-only"]).output.splitLines()
         let staged = runGit(arguments: ["diff", "--cached", "--name-only"]).output.splitLines()
         let untracked = runGit(arguments: ["ls-files", "--others", "--exclude-standard"]).output.splitLines()
-        unstagedPaths = Set((modified + staged + untracked).compactMap(uiRelativePath(gitRelativePath:)))
+        let paths = Set((modified + staged + untracked).compactMap(uiRelativePath(gitRelativePath:)))
+        return RepositoryStatusSnapshot(
+            unstagedPaths: paths,
+            branchName: currentBranchName,
+            tree: makeTree(unstagedPaths: paths)
+        )
+    }
+
+    func apply(_ snapshot: RepositoryStatusSnapshot) {
+        unstagedPaths = snapshot.unstagedPaths
     }
 
     func committedText(relativePath: String) -> String? {
@@ -130,6 +149,10 @@ final class Repository {
     }
 
     func makeTree() -> FileNode {
+        makeTree(unstagedPaths: unstagedPaths)
+    }
+
+    private func makeTree(unstagedPaths: Set<String>) -> FileNode {
         let fileManager = FileManager.default
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isHiddenKey]
         let enumerator = fileManager.enumerator(

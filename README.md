@@ -67,7 +67,9 @@ to keep the buffer, reload from disk, or cancel. Commits are blocked when the
 Git index contains staged files that are outside the opened folder or otherwise
 not represented in the file viewer. When a DiffEdit window becomes active, its
 open file is reread and rediffed only if that file's modification date changed;
-the caret returns to the same logical line and column after a reload.
+the caret returns to the same logical line and column after a reload. Git and
+disk refresh preparation runs in the background so activating or switching
+windows does not block the app.
 
 ## Useful shortcuts
 
