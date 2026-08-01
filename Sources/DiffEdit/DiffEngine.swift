@@ -382,7 +382,9 @@ enum DiffEngine {
                     let whole = NSRange(location: lineStart, length: (insertion.1 as NSString).length)
                     if let trimmed = trimmedTrailingNewline(range: whole, in: current as NSString) {
                         result.insertedWordRanges.append(trimmed)
-                        result.revertActions.append(RevertAction(currentRange: trimmed, replacement: ""))
+                    }
+                    if whole.length > 0 {
+                        result.revertActions.append(RevertAction(currentRange: whole, replacement: ""))
                     }
                     result.currentToBaseLine[insertion.0] = min(insertion.0, max(0, baseLines.count - 1))
                 }

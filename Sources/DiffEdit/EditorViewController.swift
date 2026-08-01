@@ -6,6 +6,19 @@ private struct StageSelection {
     var selected: Set<StagingChangeID>
 }
 
+private struct ForegroundEditorState {
+    let line: Int
+    let column: Int
+    let selectionLength: Int
+    let affinity: NSSelectionAffinity
+    let scrollOrigin: CGPoint
+}
+
+private struct DiskFileSnapshot {
+    let text: String?
+    let modificationDate: Date?
+}
+
 enum WorkspaceMode: Int {
     case editing
     case staging
@@ -15,6 +28,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     var onBufferedChangesChanged: ((Set<String>) -> Void)?
     var onStageSelectionAvailabilityChanged: ((Bool) -> Void)?
     var onModeChanged: ((WorkspaceMode) -> Void)?
+    var resolveExternalFileConflict: ((ExternalFileConflict) -> ExternalFileResolution)?
 
     private let stack = NSStackView()
     private let modeBar = NSView()
@@ -45,6 +59,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     private var lastDiff = DiffResult.empty
     private var isApplyingHighlights = false
     private var committedVisibleBaseLines: [Int?] = []
+    private var foregroundEditorState: ForegroundEditorState?
     private let editorContentMargin: CGFloat = 24
 
     override func loadView() {
@@ -201,23 +216,62 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         onStageSelectionAvailabilityChanged?(false)
     }
 
-    func open(file url: URL, relativePath: String, repository: Repository, onSaved: @escaping () -> Void) throws {
+    @discardableResult
+    func open(file url: URL, relativePath: String, repository: Repository, onSaved: @escaping () -> Void) throws -> Bool {
         persistCurrentBuffer()
         pendingDiffWorkItem?.cancel()
         self.onSaved = onSaved
 
         let buffer: EditorBuffer
-        if let existing = buffersByPath[relativePath] {
+        if var existing = buffersByPath[relativePath] {
+            let observedModificationDate = try diskModificationDate(at: existing.url)
+            if observedModificationDate != existing.knownDiskModificationDate {
+                let observedDisk = try readDiskSnapshot(at: existing.url)
+                if observedDisk.text == existing.knownDiskText {
+                    existing.acknowledgeUnchangedDisk(modificationDate: observedDisk.modificationDate)
+                } else if existing.text == existing.knownDiskText, !existing.requiresOverwriteConfirmation {
+                    existing.reloadFromDisk(
+                        observedDisk.text,
+                        modificationDate: observedDisk.modificationDate
+                    )
+                } else {
+                    let conflict = ExternalFileConflict(
+                        relativePath: relativePath,
+                        operation: .activating,
+                        fileWasDeleted: observedDisk.text == nil
+                    )
+                    switch resolveExternalFileConflict?(conflict) ?? .cancel {
+                    case .reloadFromDisk:
+                        existing.reloadFromDisk(
+                            observedDisk.text,
+                            modificationDate: observedDisk.modificationDate
+                        )
+                    case .keepBuffer:
+                        existing.keepBufferAfterExternalChange(
+                            observedDisk.text,
+                            modificationDate: observedDisk.modificationDate
+                        )
+                    case .cancel:
+                        return false
+                    }
+                }
+                buffersByPath[relativePath] = existing
+                reportBufferedChanges()
+            }
             buffer = existing
         } else {
-            let workingText = try String(contentsOf: url, encoding: .utf8)
+            let observedDisk = try readDiskSnapshot(at: url)
+            guard let workingText = observedDisk.text else {
+                throw CocoaError(.fileNoSuchFile)
+            }
             let committedText = repository.committedText(relativePath: relativePath) ?? ""
             let newBuffer = EditorBuffer(
                 url: url,
                 relativePath: relativePath,
                 baseText: committedText,
                 text: workingText,
-                savedText: workingText,
+                knownDiskText: workingText,
+                knownDiskModificationDate: observedDisk.modificationDate,
                 selection: NSRange(location: 0, length: 0),
                 selectionAffinity: .downstream,
                 scrollOrigin: .zero
@@ -227,6 +281,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         }
 
         activate(buffer)
+        return true
     }
 
     private func activate(_ buffer: EditorBuffer) {
@@ -258,8 +313,22 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         persistCurrentBuffer()
         guard let relativePath = currentRelativePath,
               var buffer = buffersByPath[relativePath] else { return }
+        guard try prepareForSave(&buffer) else {
+            buffersByPath[relativePath] = buffer
+            activate(buffer)
+            statusLabel.stringValue = "Reloaded external changes in \(relativePath)"
+            reportBufferedChanges()
+            onSaved?()
+            return
+        }
+        guard buffer.hasUnsavedChanges || buffer.requiresOverwriteConfirmation else {
+            buffersByPath[relativePath] = buffer
+            statusLabel.stringValue = "No changes to save in \(relativePath)"
+            reportBufferedChanges()
+            return
+        }
         try buffer.text.write(to: buffer.url, atomically: true, encoding: .utf8)
-        buffer.markSaved()
+        buffer.markSaved(modificationDate: try diskModificationDate(at: buffer.url))
         buffersByPath[relativePath] = buffer
         statusLabel.stringValue = "Saved \(relativePath)"
         reportBufferedChanges()
@@ -270,16 +339,28 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     func saveAllFiles() throws {
         persistCurrentBuffer()
         defer { reportBufferedChanges() }
+        var reloadedCurrentBuffer = false
         for relativePath in bufferedChangePaths.sorted() {
             guard var buffer = buffersByPath[relativePath] else { continue }
+            guard try prepareForSave(&buffer) else {
+                buffersByPath[relativePath] = buffer
+                reloadedCurrentBuffer = reloadedCurrentBuffer || relativePath == currentRelativePath
+                continue
+            }
             try buffer.text.write(to: buffer.url, atomically: true, encoding: .utf8)
-            buffer.markSaved()
+            buffer.markSaved(modificationDate: try diskModificationDate(at: buffer.url))
             buffersByPath[relativePath] = buffer
         }
         if let currentRelativePath {
             statusLabel.stringValue = "Saved all files"
             if let current = buffersByPath[currentRelativePath] {
                 baseText = current.baseText
+                if reloadedCurrentBuffer {
+                    activate(current)
+                    statusLabel.stringValue = "Saved files and reloaded external changes"
+                    onSaved?()
+                    return
+                }
             }
             recomputeHighlights()
         }
@@ -320,6 +401,97 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         } else {
             onStageSelectionAvailabilityChanged?(false)
         }
+    }
+
+    func captureForegroundState() {
+        persistCurrentBuffer()
+        guard currentRelativePath != nil else {
+            foregroundEditorState = nil
+            return
+        }
+        let nsString = textView.string as NSString
+        let selection = textView.selectedRange()
+        let line = nsString.lineIndex(containing: selection.location)
+        let lineStart = nsString.lineStartOffset(forLineIndex: line)
+        foregroundEditorState = ForegroundEditorState(
+            line: line,
+            column: max(0, selection.location - lineStart),
+            selectionLength: selection.length,
+            affinity: textView.selectionAffinity,
+            scrollOrigin: mainScroll.contentView.bounds.origin
+        )
+    }
+
+    @discardableResult
+    func refreshCurrentFileFromDisk(using repository: Repository) throws -> Bool {
+        persistCurrentBuffer()
+        guard let currentRelativePath,
+              var buffer = buffersByPath[currentRelativePath] else { return false }
+        let observedModificationDate = try diskModificationDate(at: buffer.url)
+        guard observedModificationDate != buffer.knownDiskModificationDate else {
+            foregroundEditorState = nil
+            return false
+        }
+
+        let observedDisk = try readDiskSnapshot(at: buffer.url)
+        var reloadedText = false
+        if observedDisk.text == buffer.knownDiskText {
+            buffer.acknowledgeUnchangedDisk(modificationDate: observedDisk.modificationDate)
+        } else {
+            if buffer.text == buffer.knownDiskText, !buffer.requiresOverwriteConfirmation {
+                buffer.reloadFromDisk(
+                    observedDisk.text,
+                    modificationDate: observedDisk.modificationDate
+                )
+                reloadedText = true
+            } else {
+                let conflict = ExternalFileConflict(
+                    relativePath: currentRelativePath,
+                    operation: .activating,
+                    fileWasDeleted: observedDisk.text == nil
+                )
+                switch resolveExternalFileConflict?(conflict) ?? .cancel {
+                case .reloadFromDisk:
+                    buffer.reloadFromDisk(
+                        observedDisk.text,
+                        modificationDate: observedDisk.modificationDate
+                    )
+                    reloadedText = true
+                case .keepBuffer:
+                    buffer.keepBufferAfterExternalChange(
+                        observedDisk.text,
+                        modificationDate: observedDisk.modificationDate
+                    )
+                case .cancel:
+                    foregroundEditorState = nil
+                    return false
+                }
+            }
+        }
+
+        for relativePath in buffersByPath.keys {
+            guard var openBuffer = buffersByPath[relativePath] else { continue }
+            openBuffer.baseText = repository.committedText(relativePath: relativePath) ?? ""
+            buffersByPath[relativePath] = openBuffer
+        }
+        buffer.baseText = repository.committedText(relativePath: currentRelativePath) ?? ""
+        if let foregroundEditorState {
+            buffer.selection = restoredSelection(in: buffer.text, from: foregroundEditorState)
+            buffer.selectionAffinity = foregroundEditorState.affinity
+            buffer.scrollOrigin = foregroundEditorState.scrollOrigin
+        }
+        buffersByPath[currentRelativePath] = buffer
+        baseText = buffer.baseText
+        if reloadedText {
+            activate(buffer)
+            textView.scrollRangeToVisible(textView.selectedRange())
+            statusLabel.stringValue = "Reloaded external changes in \(currentRelativePath)"
+            reportBufferedChanges()
+        } else {
+            recomputeHighlights()
+        }
+        foregroundEditorState = nil
+        return true
     }
 
     func toggleWordWrap() {
@@ -388,11 +560,86 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         guard let currentRelativePath,
               var buffer = buffersByPath[currentRelativePath] else { return }
         buffer.text = textView.string
+        if buffer.text == buffer.knownDiskText {
+            buffer.requiresOverwriteConfirmation = false
+        }
         buffer.selection = textView.selectedRange()
         buffer.selectionAffinity = textView.selectionAffinity
         buffer.scrollOrigin = mainScroll.contentView.bounds.origin
         buffersByPath[currentRelativePath] = buffer
         reportBufferedChanges()
+    }
+
+    private func prepareForSave(_ buffer: inout EditorBuffer) throws -> Bool {
+        let observedModificationDate = try diskModificationDate(at: buffer.url)
+        let metadataChanged = observedModificationDate != buffer.knownDiskModificationDate
+        let observedDisk = metadataChanged
+            ? try readDiskSnapshot(at: buffer.url)
+            : DiskFileSnapshot(text: buffer.knownDiskText, modificationDate: buffer.knownDiskModificationDate)
+        let diskChanged = observedDisk.text != buffer.knownDiskText
+        if metadataChanged, !diskChanged {
+            buffer.acknowledgeUnchangedDisk(modificationDate: observedDisk.modificationDate)
+        }
+        if diskChanged,
+           buffer.text == buffer.knownDiskText,
+           !buffer.requiresOverwriteConfirmation {
+            buffer.reloadFromDisk(
+                observedDisk.text,
+                modificationDate: observedDisk.modificationDate
+            )
+            return false
+        }
+        guard diskChanged || buffer.requiresOverwriteConfirmation else { return true }
+        let conflict = ExternalFileConflict(
+            relativePath: buffer.relativePath,
+            operation: .saving,
+            fileWasDeleted: observedDisk.text == nil
+        )
+        switch resolveExternalFileConflict?(conflict) ?? .cancel {
+        case .reloadFromDisk:
+            buffer.reloadFromDisk(
+                observedDisk.text,
+                modificationDate: observedDisk.modificationDate
+            )
+            return false
+        case .keepBuffer:
+            buffer.keepBufferAfterExternalChange(
+                observedDisk.text,
+                modificationDate: observedDisk.modificationDate
+            )
+            return true
+        case .cancel:
+            throw EditorFileError.cancelled
+        }
+    }
+
+    private func diskModificationDate(at url: URL) throws -> Date? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return attributes[.modificationDate] as? Date
+    }
+
+    private func readDiskSnapshot(at url: URL) throws -> DiskFileSnapshot {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return DiskFileSnapshot(text: nil, modificationDate: nil)
+        }
+        let text = try String(contentsOf: url, encoding: .utf8)
+        return DiskFileSnapshot(text: text, modificationDate: try diskModificationDate(at: url))
+    }
+
+    private func restoredSelection(in text: String, from state: ForegroundEditorState) -> NSRange {
+        let nsString = text as NSString
+        let lines = text.splitKeepingEmptyLines()
+        let line = min(max(0, state.line), max(0, lines.count - 1))
+        let lineStart = nsString.lineStartOffset(forLineIndex: line)
+        let lineLength = lines[safe: line].map {
+            ($0.trimmedTrailingNewline() as NSString).length
+        } ?? 0
+        let location = min(nsString.length, lineStart + min(state.column, lineLength))
+        return NSRange(
+            location: location,
+            length: min(state.selectionLength, nsString.length - location)
+        )
     }
 
     private func reportBufferedChanges() {

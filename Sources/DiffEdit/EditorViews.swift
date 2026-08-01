@@ -93,6 +93,7 @@ final class LineHighlightTextView: NSTextView {
     override func menu(for event: NSEvent) -> NSMenu? {
         let localPoint = convert(event.locationInWindow, from: nil)
         guard let layoutManager, let textContainer else { return super.menu(for: event) }
+        guard layoutManager.numberOfGlyphs > 0 else { return super.menu(for: event) }
         var point = localPoint
         point.x -= textContainerOrigin.x
         point.y -= textContainerOrigin.y

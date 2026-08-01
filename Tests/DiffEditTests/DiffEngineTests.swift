@@ -29,12 +29,23 @@ final class DiffEngineTests: XCTestCase {
     }
 
     func testInsertedLineIsHighlightedAndDiscardable() {
+        let base = "one\ntwo\n"
         let current = "one\ninserted\ntwo\n"
-        let result = DiffEngine.diff(base: "one\ntwo\n", current: current)
+        let result = DiffEngine.diff(base: base, current: current)
 
         XCTAssertEqual(result.currentTouchedLines, [1])
         XCTAssertEqual(highlightedStrings(result.insertedWordRanges, in: current), ["inserted"])
         XCTAssertEqual(result.revertActions.first?.replacement, "")
+        XCTAssertEqual(applying(result.revertActions[0], to: current), base)
+    }
+
+    func testInsertedBlankLineIsDiscardableWithItsNewline() {
+        let base = "one\ntwo\n"
+        let current = "one\n\ntwo\n"
+        let result = DiffEngine.diff(base: base, current: current)
+
+        XCTAssertEqual(result.revertActions.count, 1)
+        XCTAssertEqual(applying(result.revertActions[0], to: current), base)
     }
 
     func testPureMidLineDeletionAddsAnInlineMarker() {
@@ -103,6 +114,10 @@ final class DiffEngineTests: XCTestCase {
     private func highlightedStrings(_ ranges: [NSRange], in string: String) -> [String] {
         let nsString = string as NSString
         return ranges.map { nsString.substring(with: $0) }
+    }
+
+    private func applying(_ action: RevertAction, to string: String) -> String {
+        (string as NSString).replacingCharacters(in: action.currentRange, with: action.replacement)
     }
 }
 
@@ -209,6 +224,25 @@ final class SelectiveStagingTests: XCTestCase {
 
         XCTAssertTrue(plan.diffRows.contains { $0.kind == .separator })
         XCTAssertLessThan(plan.diffRows.count, 20)
+    }
+
+    func testSelectiveStagingPreservesCRLFLineEndings() {
+        let base = "one\r\ntwo\r\n"
+        let current = "one\r\nTWO\r\n"
+        let plan = DiffEngine.selectiveStagingPlan(base: base, current: current)
+
+        XCTAssertEqual(plan.text(selectedChanges: []), base)
+        XCTAssertEqual(plan.text(selectedChanges: plan.selectableChanges), current)
+    }
+
+    func testSelectiveStagingPreservesMissingFinalNewline() {
+        let base = "one\ntwo"
+        let current = "one\nTWO"
+        let plan = DiffEngine.selectiveStagingPlan(base: base, current: current)
+
+        XCTAssertEqual(plan.text(selectedChanges: []), base)
+        XCTAssertEqual(plan.text(selectedChanges: plan.selectableChanges), current)
+        XCTAssertFalse(plan.text(selectedChanges: plan.selectableChanges).hasSuffix("\n"))
     }
 }
 
@@ -317,6 +351,59 @@ final class RepositoryStagingTests: XCTestCase {
         try repository.stage(text: "base\n", relativePath: "example.txt")
 
         XCTAssertEqual(try runGitStatus(["diff", "--cached", "--quiet"], in: directory), 0)
+    }
+
+    func testCommitScopeDetectsStagedFilesOutsideAnOpenedSubfolder() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiffEditRepositoryTests-\(UUID().uuidString)")
+        let openedFolder = directory.appendingPathComponent("Opened")
+        try FileManager.default.createDirectory(at: openedFolder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try runGit(["init", "-q"], in: directory)
+        _ = try runGit(["config", "user.name", "DiffEdit Tests"], in: directory)
+        _ = try runGit(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        try "inside\n".write(to: openedFolder.appendingPathComponent("inside.txt"), atomically: true, encoding: .utf8)
+        try "outside\n".write(to: directory.appendingPathComponent("outside.txt"), atomically: true, encoding: .utf8)
+        _ = try runGit(["add", "."], in: directory)
+        _ = try runGit(["commit", "-q", "-m", "Initial"], in: directory)
+        try "staged outside\n".write(to: directory.appendingPathComponent("outside.txt"), atomically: true, encoding: .utf8)
+        _ = try runGit(["add", "outside.txt"], in: directory)
+
+        let repository = Repository(rootURL: openedFolder)
+
+        XCTAssertEqual(
+            try repository.invisibleStagedPaths(representedUIPaths: ["inside.txt"]),
+            ["outside.txt"]
+        )
+    }
+
+    func testStagingAppliesPathDependentCleanFilter() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiffEditRepositoryTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try runGit(["init", "-q"], in: directory)
+        _ = try runGit(["config", "user.name", "DiffEdit Tests"], in: directory)
+        _ = try runGit(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        _ = try runGit(["config", "filter.uppercase.clean", "tr a-z A-Z"], in: directory)
+        _ = try runGit(["config", "filter.uppercase.smudge", "cat"], in: directory)
+        try "*.txt filter=uppercase\n".write(
+            to: directory.appendingPathComponent(".gitattributes"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "base\n".write(
+            to: directory.appendingPathComponent("example.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        _ = try runGit(["add", "."], in: directory)
+        _ = try runGit(["commit", "-q", "-m", "Initial"], in: directory)
+        let repository = Repository(rootURL: directory)
+
+        try repository.stage(text: "mixed Case\n", relativePath: "example.txt")
+
+        XCTAssertEqual(try runGit(["show", ":example.txt"], in: directory), "MIXED CASE\n")
     }
 
     private func runGit(_ arguments: [String], in directory: URL, allowFailure: Bool = false) throws -> String {
@@ -499,9 +586,9 @@ final class EditorBufferTests: XCTestCase {
         buffer.text = "edited"
         XCTAssertTrue(buffer.hasUnsavedChanges)
 
-        buffer.markSaved()
+        buffer.markSaved(modificationDate: nil)
         XCTAssertFalse(buffer.hasUnsavedChanges)
-        XCTAssertEqual(buffer.savedText, "edited")
+        XCTAssertEqual(buffer.knownDiskText, "edited")
     }
 
     func testRevertingToSavedTextClearsDirtyState() {
@@ -524,13 +611,38 @@ final class EditorBufferTests: XCTestCase {
         XCTAssertEqual(buffer.scrollOrigin, CGPoint(x: 0, y: 120))
     }
 
+    func testCleanBufferCanReloadAnExternalChange() {
+        var buffer = makeBuffer(text: "original")
+
+        buffer.reloadFromDisk("external", modificationDate: nil)
+
+        XCTAssertEqual(buffer.text, "external")
+        XCTAssertEqual(buffer.knownDiskText, "external")
+        XCTAssertFalse(buffer.hasUnsavedChanges)
+    }
+
+    func testKeepingBufferAfterExternalChangeRequiresConfirmedOverwrite() {
+        var buffer = makeBuffer(text: "original")
+        buffer.text = "my edit"
+
+        buffer.keepBufferAfterExternalChange("external", modificationDate: nil)
+
+        XCTAssertEqual(buffer.text, "my edit")
+        XCTAssertEqual(buffer.knownDiskText, "external")
+        XCTAssertTrue(buffer.hasUnsavedChanges)
+        XCTAssertTrue(buffer.requiresOverwriteConfirmation)
+        buffer.markSaved(modificationDate: nil)
+        XCTAssertFalse(buffer.requiresOverwriteConfirmation)
+    }
+
     private func makeBuffer(text: String) -> EditorBuffer {
         EditorBuffer(
             url: URL(fileURLWithPath: "/tmp/example.txt"),
             relativePath: "example.txt",
             baseText: text,
             text: text,
-            savedText: text,
+            knownDiskText: text,
+            knownDiskModificationDate: nil,
             selection: NSRange(location: 0, length: 0),
             selectionAffinity: .downstream,
             scrollOrigin: .zero
@@ -629,6 +741,96 @@ final class WorkspaceModeUITests: XCTestCase {
         sidebar.load(root: root)
 
         XCTAssertTrue(sidebar.selectFile(relativePath: file.relativePath))
+    }
+
+    func testReloadResolutionPreventsSaveFromOverwritingExternalEdit() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiffEditExternalEditTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("example.txt")
+        try "original\n".write(to: fileURL, atomically: true, encoding: .utf8)
+        let editor = EditorViewController()
+        editor.loadView()
+        editor.resolveExternalFileConflict = { _ in .reloadFromDisk }
+        XCTAssertTrue(try editor.open(
+            file: fileURL,
+            relativePath: "example.txt",
+            repository: Repository(rootURL: directory),
+            onSaved: {}
+        ))
+        let editableTextView = try XCTUnwrap(
+            descendants(of: editor.view, matching: NSTextView.self).first(where: \.isEditable)
+        )
+        editableTextView.string = "buffer edit\n"
+        try "external edit\n".write(to: fileURL, atomically: true, encoding: .utf8)
+
+        try editor.saveCurrentFile()
+
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), "external edit\n")
+        XCTAssertEqual(editableTextView.string, "external edit\n")
+    }
+
+    func testSavingCleanBufferDoesNotRecreateExternallyDeletedFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiffEditExternalEditTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("example.txt")
+        try "original\n".write(to: fileURL, atomically: true, encoding: .utf8)
+        let editor = EditorViewController()
+        editor.loadView()
+        XCTAssertTrue(try editor.open(
+            file: fileURL,
+            relativePath: "example.txt",
+            repository: Repository(rootURL: directory),
+            onSaved: {}
+        ))
+        try FileManager.default.removeItem(at: fileURL)
+
+        try editor.saveCurrentFile()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testWindowReactivationReloadsOnlyAfterOpenFileModificationDateChanges() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiffEditForegroundRefreshTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("example.txt")
+        let initialText = "first\nsecond line\nthird\n"
+        let externalText = "first\nSECOND externally\nthird\n"
+        let initialDate = Date(timeIntervalSince1970: 1_800_000_000)
+        try initialText.write(to: fileURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: initialDate], ofItemAtPath: fileURL.path)
+
+        let editor = EditorViewController()
+        editor.loadView()
+        XCTAssertTrue(try editor.open(
+            file: fileURL,
+            relativePath: "example.txt",
+            repository: Repository(rootURL: directory),
+            onSaved: {}
+        ))
+        let editableTextView = try XCTUnwrap(
+            descendants(of: editor.view, matching: NSTextView.self).first(where: \.isEditable)
+        )
+        let originalCaret = ("first\n" as NSString).length + 3
+        editableTextView.setSelectedRange(NSRange(location: originalCaret, length: 0))
+        editor.captureForegroundState()
+
+        try externalText.write(to: fileURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: initialDate], ofItemAtPath: fileURL.path)
+        XCTAssertFalse(try editor.refreshCurrentFileFromDisk(using: Repository(rootURL: directory)))
+        XCTAssertEqual(editableTextView.string, initialText)
+
+        editor.captureForegroundState()
+        let changedDate = initialDate.addingTimeInterval(10)
+        try FileManager.default.setAttributes([.modificationDate: changedDate], ofItemAtPath: fileURL.path)
+        XCTAssertTrue(try editor.refreshCurrentFileFromDisk(using: Repository(rootURL: directory)))
+        XCTAssertEqual(editableTextView.string, externalText)
+        XCTAssertEqual(editableTextView.selectedRange(), NSRange(location: originalCaret, length: 0))
     }
 
     private func descendants<T: NSView>(of view: NSView, matching type: T.Type) -> [T] {

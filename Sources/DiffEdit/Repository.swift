@@ -3,6 +3,7 @@ import Foundation
 enum RepositoryError: LocalizedError {
     case notGitRepository
     case emptyCommitMessage
+    case invisibleStagedChanges([String])
     case commandFailed(String)
 
     var errorDescription: String? {
@@ -11,6 +12,10 @@ enum RepositoryError: LocalizedError {
             return "The opened folder is not inside a Git repository."
         case .emptyCommitMessage:
             return "Enter a commit message first."
+        case let .invisibleStagedChanges(paths):
+            let listedPaths = paths.prefix(12).map { "• \($0)" }.joined(separator: "\n")
+            let remainder = paths.count > 12 ? "\n…and \(paths.count - 12) more" : ""
+            return "DiffEdit cannot commit because the Git index contains staged files that are not visible in the opened folder:\n\n\(listedPaths)\(remainder)\n\nOpen the repository root or unstage those files first."
         case let .commandFailed(message):
             return message.isEmpty ? "Git could not complete the operation." : message
         }
@@ -59,6 +64,22 @@ final class Repository {
         return branch.isEmpty ? "HEAD" : branch
     }
 
+    func invisibleStagedPaths(representedUIPaths: Set<String>) throws -> [String] {
+        guard isGitRepository else { return [] }
+        let result = runGit(arguments: ["diff", "--cached", "--name-only", "-z"], allowFailure: true)
+        guard result.status == 0 else {
+            throw RepositoryError.commandFailed(result.output.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return result.output.split(separator: "\0", omittingEmptySubsequences: true).compactMap { rawPath in
+            let gitPath = String(rawPath)
+            guard let uiPath = uiRelativePath(gitRelativePath: gitPath),
+                  representedUIPaths.contains(uiPath) else {
+                return gitPath
+            }
+            return nil
+        }.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
     func stage(text: String, relativePath: String) throws {
         guard isGitRepository else { throw RepositoryError.notGitRepository }
         let gitPath = gitRelativePath(uiRelativePath: relativePath)
@@ -75,7 +96,7 @@ final class Repository {
         }
 
         let blob = runGit(
-            arguments: ["hash-object", "-w", "--stdin"],
+            arguments: ["hash-object", "-w", "--stdin", "--path=\(gitPath)"],
             input: Data(text.utf8),
             allowFailure: true
         )

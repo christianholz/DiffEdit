@@ -11,11 +11,11 @@ extension String {
         enumerateSubstrings(in: startIndex..<endIndex, options: [.byLines, .substringNotRequired]) { _, range, enclosingRange, _ in
             var line = String(self[range])
             if enclosingRange.upperBound > range.upperBound {
-                line += "\n"
+                line += String(self[range.upperBound..<enclosingRange.upperBound])
             }
             lines.append(line)
         }
-        if hasSuffix("\n") {
+        if let lastScalar = unicodeScalars.last, CharacterSet.newlines.contains(lastScalar) {
             lines.append("")
         }
         return lines

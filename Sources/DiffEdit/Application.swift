@@ -48,10 +48,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AppCommands {
         return .terminateNow
     }
 
-    func applicationDidBecomeActive(_ notification: Notification) {
-        activeMainController?.refreshRepositoryStatus()
-    }
-
     func openFolder(_ sender: Any?) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -286,7 +282,11 @@ final class WindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        mainViewController.refreshRepositoryStatus()
+        mainViewController.refreshAfterBecomingKey()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        mainViewController.captureBeforeResigningKey()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -328,6 +328,9 @@ final class MainViewController: NSSplitViewController, AppCommands {
             self.sidebar.setMode(mode)
             self.refreshRepositoryStatus()
         }
+        editor.resolveExternalFileConflict = { [weak self] conflict in
+            self?.resolveExternalFileConflict(conflict) ?? .cancel
+        }
         sidebar.onStageSelected = { [weak self] in
             self?.stageSelectedChanges()
         }
@@ -343,6 +346,8 @@ final class MainViewController: NSSplitViewController, AppCommands {
     func saveDocument(_ sender: Any?) {
         do {
             try editor.saveCurrentFile()
+        } catch EditorFileError.cancelled {
+            return
         } catch {
             presentError(error, title: "Couldn’t Save File")
         }
@@ -408,6 +413,8 @@ final class MainViewController: NSSplitViewController, AppCommands {
             do {
                 try editor.saveAllFiles()
                 return true
+            } catch EditorFileError.cancelled {
+                return false
             } catch {
                 presentError(error, title: "Couldn’t Save All Files")
                 return false
@@ -424,6 +431,22 @@ final class MainViewController: NSSplitViewController, AppCommands {
         if let repository {
             sidebar.setCurrentBranchName(repository.currentBranchName)
             sidebar.load(root: repository.makeTree())
+        }
+    }
+
+    func captureBeforeResigningKey() {
+        editor.captureForegroundState()
+    }
+
+    func refreshAfterBecomingKey() {
+        guard let repository else { return }
+        repository.refreshStatus()
+        sidebar.setCurrentBranchName(repository.currentBranchName)
+        sidebar.load(root: repository.makeTree(), preservingSelection: editor.currentDocumentPath)
+        do {
+            try editor.refreshCurrentFileFromDisk(using: repository)
+        } catch {
+            presentError(error, title: "Couldn’t Refresh File")
         }
     }
 
@@ -450,12 +473,12 @@ final class MainViewController: NSSplitViewController, AppCommands {
             return true
         }
         do {
-            try editor.open(file: url, relativePath: relativePath, repository: repository) { [weak self] in
+            guard try editor.open(file: url, relativePath: relativePath, repository: repository, onSaved: { [weak self] in
                 self?.repository?.refreshStatus()
                 if let repository = self?.repository {
                     self?.sidebar.load(root: repository.makeTree(), preservingSelection: relativePath)
                 }
-            }
+            }) else { return false }
             sidebar.selectFile(relativePath: relativePath)
             return true
         } catch {
@@ -505,6 +528,11 @@ final class MainViewController: NSSplitViewController, AppCommands {
             guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw RepositoryError.emptyCommitMessage
             }
+            let representedPaths = Set(repository.makeTree().filesInDisplayOrder.map(\.relativePath))
+            let invisibleStagedPaths = try repository.invisibleStagedPaths(representedUIPaths: representedPaths)
+            guard invisibleStagedPaths.isEmpty else {
+                throw RepositoryError.invisibleStagedChanges(invisibleStagedPaths)
+            }
             if editor.hasStageableChanges {
                 try editor.stageSelectedChanges(using: repository)
             }
@@ -524,5 +552,30 @@ final class MainViewController: NSSplitViewController, AppCommands {
         let alert = NSAlert(error: error)
         alert.messageText = title
         alert.runModal()
+    }
+
+    private func resolveExternalFileConflict(_ conflict: ExternalFileConflict) -> ExternalFileResolution {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = conflict.fileWasDeleted
+            ? "\(conflict.relativePath) was deleted outside DiffEdit."
+            : "\(conflict.relativePath) changed outside DiffEdit."
+        if conflict.operation == .saving {
+            alert.informativeText = "Saving your buffered version will overwrite the external change."
+            alert.addButton(withTitle: conflict.fileWasDeleted ? "Recreate File" : "Overwrite")
+        } else {
+            alert.informativeText = "Choose whether to keep your buffered version or reload the file from disk."
+            alert.addButton(withTitle: "Keep My Changes")
+        }
+        alert.addButton(withTitle: "Reload from Disk")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return .keepBuffer
+        case .alertSecondButtonReturn:
+            return .reloadFromDisk
+        default:
+            return .cancel
+        }
     }
 }
