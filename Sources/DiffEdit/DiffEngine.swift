@@ -31,6 +31,19 @@ struct LineRange {
 struct DeletionMarker {
     let line: Int
     let column: Int
+    let kind: Kind
+
+    enum Kind: Equatable {
+        case inline
+        case lineBoundaryBefore
+        case lineBoundaryAfter
+    }
+
+    init(line: Int, column: Int, kind: Kind = .inline) {
+        self.line = line
+        self.column = column
+        self.kind = kind
+    }
 }
 
 struct LineColumn: Hashable {
@@ -43,6 +56,56 @@ struct CaretMarker {
     let column: Int
 }
 
+struct SelectiveStagingPlan {
+    let selectableChanges: Set<StagingChangeID>
+    let diffRows: [StagingDiffRow]
+    private let chunks: [Chunk]
+
+    fileprivate init(selectableChanges: Set<StagingChangeID>, diffRows: [StagingDiffRow], chunks: [Chunk]) {
+        self.selectableChanges = selectableChanges
+        self.diffRows = diffRows
+        self.chunks = chunks
+    }
+
+    func text(selectedChanges: Set<StagingChangeID>) -> String {
+        chunks.map { chunk in
+            switch chunk {
+            case let .unchanged(text):
+                return text
+            case let .changed(id, selected, unselected):
+                return selectedChanges.contains(id) ? selected : unselected
+            }
+        }.joined()
+    }
+
+    fileprivate enum Chunk {
+        case unchanged(String)
+        case changed(id: StagingChangeID, selected: String, unselected: String)
+    }
+}
+
+enum StagingDiffRowKind: Hashable {
+    case context
+    case deletion
+    case insertion
+    case separator
+}
+
+struct StagingChangeID: Hashable {
+    let kind: StagingDiffRowKind
+    let oldLineIndex: Int?
+    let newLineIndex: Int?
+    let text: String
+}
+
+struct StagingDiffRow {
+    let kind: StagingDiffRowKind
+    let oldLineNumber: Int?
+    let newLineNumber: Int?
+    let text: String
+    let selectionID: StagingChangeID?
+}
+
 enum EditorShortcut {
     case nextChangedGroup
     case previousChangedGroup
@@ -52,7 +115,203 @@ enum EditorShortcut {
     case nextParagraph
 }
 
+enum ChangeNavigationDirection {
+    case previous
+    case next
+}
+
+enum ChangedLineNavigator {
+    static func groups(for lines: Set<Int>) -> [ClosedRange<Int>] {
+        let sortedLines = lines.sorted()
+        guard let first = sortedLines.first else { return [] }
+        var result: [ClosedRange<Int>] = []
+        var start = first
+        var previous = first
+        for line in sortedLines.dropFirst() {
+            if line == previous + 1 {
+                previous = line
+            } else {
+                result.append(start...previous)
+                start = line
+                previous = line
+            }
+        }
+        result.append(start...previous)
+        return result
+    }
+
+    static func adjacentTarget(
+        in lines: Set<Int>,
+        from currentLine: Int,
+        direction: ChangeNavigationDirection
+    ) -> Int? {
+        let groups = groups(for: lines)
+        switch direction {
+        case .next:
+            return groups.first(where: { $0.lowerBound > currentLine })?.lowerBound
+        case .previous:
+            return groups.reversed().first(where: { $0.upperBound < currentLine })?.lowerBound
+        }
+    }
+
+    static func edgeTarget(in lines: Set<Int>, direction: ChangeNavigationDirection) -> Int? {
+        let groups = groups(for: lines)
+        switch direction {
+        case .next:
+            return groups.first?.lowerBound
+        case .previous:
+            return groups.last?.lowerBound
+        }
+    }
+}
+
+enum ChangedFileNavigator {
+    static func adjacentPath(
+        in paths: [String],
+        from currentPath: String?,
+        direction: ChangeNavigationDirection
+    ) -> String? {
+        var seen = Set<String>()
+        let orderedPaths = paths.filter {
+            seen.insert($0).inserted
+        }
+        guard !orderedPaths.isEmpty else { return nil }
+        guard let currentPath else {
+            return direction == .next ? orderedPaths.first : orderedPaths.last
+        }
+        if let index = orderedPaths.firstIndex(of: currentPath) {
+            switch direction {
+            case .next:
+                return orderedPaths[(index + 1) % orderedPaths.count]
+            case .previous:
+                return orderedPaths[(index - 1 + orderedPaths.count) % orderedPaths.count]
+            }
+        }
+        return direction == .next ? orderedPaths.first : orderedPaths.last
+    }
+}
+
 enum DiffEngine {
+    static func selectiveStagingPlan(base: String, current: String) -> SelectiveStagingPlan {
+        let baseLines = base.splitKeepingEmptyLines()
+        let currentLines = current.splitKeepingEmptyLines()
+        let operations = sequenceDiff(old: baseLines, new: currentLines)
+        var chunks: [SelectiveStagingPlan.Chunk] = []
+        var rawRows: [StagingDiffRow] = []
+        var selectableChanges = Set<StagingChangeID>()
+        var oldIndex = 0
+        var newIndex = 0
+        var pendingDeletes: [(line: Int, text: String)] = []
+        var pendingInserts: [(line: Int, text: String)] = []
+
+        func flushChangedBlock() {
+            guard !pendingDeletes.isEmpty || !pendingInserts.isEmpty else { return }
+            for deletion in pendingDeletes where !deletion.text.isEmpty {
+                let id = StagingChangeID(
+                    kind: .deletion,
+                    oldLineIndex: deletion.line,
+                    newLineIndex: nil,
+                    text: deletion.text
+                )
+                selectableChanges.insert(id)
+                chunks.append(.changed(
+                    id: id,
+                    selected: "",
+                    unselected: deletion.text
+                ))
+                rawRows.append(StagingDiffRow(
+                    kind: .deletion,
+                    oldLineNumber: deletion.line + 1,
+                    newLineNumber: nil,
+                    text: deletion.text.trimmedTrailingNewline(),
+                    selectionID: id
+                ))
+            }
+            for insertion in pendingInserts where !insertion.text.isEmpty {
+                let id = StagingChangeID(
+                    kind: .insertion,
+                    oldLineIndex: nil,
+                    newLineIndex: insertion.line,
+                    text: insertion.text
+                )
+                selectableChanges.insert(id)
+                chunks.append(.changed(id: id, selected: insertion.text, unselected: ""))
+                rawRows.append(StagingDiffRow(
+                    kind: .insertion,
+                    oldLineNumber: nil,
+                    newLineNumber: insertion.line + 1,
+                    text: insertion.text.trimmedTrailingNewline(),
+                    selectionID: id
+                ))
+            }
+            pendingDeletes.removeAll()
+            pendingInserts.removeAll()
+        }
+
+        for operation in operations {
+            switch operation {
+            case .equal:
+                flushChangedBlock()
+                chunks.append(.unchanged(baseLines[oldIndex]))
+                rawRows.append(StagingDiffRow(
+                    kind: .context,
+                    oldLineNumber: oldIndex + 1,
+                    newLineNumber: newIndex + 1,
+                    text: baseLines[oldIndex].trimmedTrailingNewline(),
+                    selectionID: nil
+                ))
+                oldIndex += 1
+                newIndex += 1
+            case .delete:
+                pendingDeletes.append((oldIndex, baseLines[oldIndex]))
+                oldIndex += 1
+            case .insert:
+                pendingInserts.append((newIndex, currentLines[newIndex]))
+                newIndex += 1
+            }
+        }
+        flushChangedBlock()
+        return SelectiveStagingPlan(
+            selectableChanges: selectableChanges,
+            diffRows: collapsedStagingRows(rawRows),
+            chunks: chunks
+        )
+    }
+
+    private static func collapsedStagingRows(_ rows: [StagingDiffRow], contextLineCount: Int = 3) -> [StagingDiffRow] {
+        let changedIndexes = rows.indices.filter { rows[$0].kind == .deletion || rows[$0].kind == .insertion }
+        guard !changedIndexes.isEmpty else { return [] }
+        var visibleIndexes = Set<Int>()
+        for index in changedIndexes {
+            let lower = max(rows.startIndex, index - contextLineCount)
+            let upper = min(rows.index(before: rows.endIndex), index + contextLineCount)
+            visibleIndexes.formUnion(lower...upper)
+        }
+
+        var result: [StagingDiffRow] = []
+        var index = rows.startIndex
+        while index < rows.endIndex {
+            if visibleIndexes.contains(index) {
+                result.append(rows[index])
+                index += 1
+                continue
+            }
+            let hiddenStart = index
+            while index < rows.endIndex, !visibleIndexes.contains(index) {
+                index += 1
+            }
+            let firstHidden = rows[hiddenStart]
+            result.append(StagingDiffRow(
+                kind: .separator,
+                oldLineNumber: firstHidden.oldLineNumber,
+                newLineNumber: firstHidden.newLineNumber,
+                text: "@@ -\(firstHidden.oldLineNumber ?? 0),… +\(firstHidden.newLineNumber ?? 0),… @@",
+                selectionID: nil
+            ))
+        }
+        return result
+    }
+
     static func diff(base: String, current: String) -> DiffResult {
         let baseLines = base.splitKeepingEmptyLines()
         let currentLines = current.splitKeepingEmptyLines()
@@ -73,13 +332,19 @@ enum DiffEngine {
             }
             var addedBoundaryDeletionMarker = false
             let boundaryDeletionMarker: DeletionMarker? = {
-                guard !currentLines.isEmpty else { return nil }
+                guard !currentLines.isEmpty else {
+                    return DeletionMarker(line: 0, column: 0, kind: .lineBoundaryBefore)
+                }
                 let line = min(newIndex, currentLines.count - 1)
                 if newIndex < currentLines.count {
-                    return DeletionMarker(line: line, column: 0)
+                    return DeletionMarker(line: line, column: 0, kind: .lineBoundaryBefore)
                 }
                 let lineText = currentLines[line].trimmedTrailingNewline()
-                return DeletionMarker(line: line, column: (lineText as NSString).length)
+                return DeletionMarker(
+                    line: line,
+                    column: (lineText as NSString).length,
+                    kind: .lineBoundaryAfter
+                )
             }()
             let count = max(pendingDeletes.count, pendingInserts.count)
             for offset in 0..<count {
@@ -96,8 +361,7 @@ enum DiffEngine {
                         let replacement = replacementText(for: localRange, deletedRanges: wordDiff.deleted, oldLine: deletion.1)
                         result.revertActions.append(RevertAction(currentRange: insertedRange, replacement: replacement))
                     }
-                    if !wordDiff.deleted.isEmpty {
-                        let markerColumn = wordDiff.inserted.first?.location ?? wordDiff.deletionMarkerColumns.first ?? 0
+                    for markerColumn in wordDiff.deletionMarkerColumns {
                         result.currentDeletionMarkers.append(DeletionMarker(line: insertion.0, column: markerColumn))
                     }
                     for (currentColumn, baseColumn) in wordDiff.currentToBaseColumn {

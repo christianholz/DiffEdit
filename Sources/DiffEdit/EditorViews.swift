@@ -24,8 +24,8 @@ final class LineHighlightTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         drawFullLineHighlights(in: dirtyRect)
-        drawDeletionMarkers(in: dirtyRect)
         super.draw(dirtyRect)
+        drawDeletionMarkers(in: dirtyRect)
         drawCaretMarker(in: dirtyRect)
     }
 
@@ -151,8 +151,27 @@ final class LineHighlightTextView: NSTextView {
               let textContainer else { return }
         let nsString = string as NSString
         let textOrigin = textContainerOrigin
+        let visibleBounds = enclosingScrollView?.contentView.bounds ?? visibleRect
         DiffPalette.deletionMarker.setFill()
         for marker in deletionMarkers {
+            if marker.kind != .inline {
+                guard let boundaryY = deletionBoundaryY(
+                    for: marker,
+                    textOrigin: textOrigin,
+                    layoutManager: layoutManager,
+                    textContainer: textContainer
+                ) else { continue }
+                let markerRect = NSRect(
+                    x: visibleBounds.minX,
+                    y: boundaryY - 1,
+                    width: visibleBounds.width,
+                    height: 2
+                ).integral
+                if markerRect.intersects(dirtyRect) {
+                    markerRect.fill()
+                }
+                continue
+            }
             let lineRange = nsString.lineRange(forLineIndex: marker.line)
             guard lineRange.location != NSNotFound else { continue }
             let clampedColumn = max(0, min(marker.column, lineRange.length))
@@ -164,6 +183,36 @@ final class LineHighlightTextView: NSTextView {
                 markerRect.fill()
             }
         }
+    }
+
+    private func deletionBoundaryY(
+        for marker: DeletionMarker,
+        textOrigin: NSPoint,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer
+    ) -> CGFloat? {
+        guard marker.kind != .inline else { return nil }
+        let nsString = string as NSString
+        if nsString.length == 0 {
+            return textOrigin.y
+        }
+        let lineRange = nsString.lineRange(forLineIndex: marker.line)
+        guard lineRange.location != NSNotFound else {
+            let usedRect = layoutManager.usedRect(for: textContainer)
+            return textOrigin.y + usedRect.maxY
+        }
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
+        guard glyphRange.length > 0 else {
+            let usedRect = layoutManager.usedRect(for: textContainer)
+            return marker.kind == .lineBoundaryBefore
+                ? textOrigin.y + usedRect.minY
+                : textOrigin.y + usedRect.maxY
+        }
+        let glyphIndex = marker.kind == .lineBoundaryBefore
+            ? glyphRange.location
+            : NSMaxRange(glyphRange) - 1
+        let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+        return textOrigin.y + (marker.kind == .lineBoundaryBefore ? fragment.minY : fragment.maxY)
     }
 
     private func drawCaretMarker(in dirtyRect: NSRect) {
@@ -314,8 +363,24 @@ final class LineNumberGutterView: NSView {
             let size = label.size(withAttributes: attributes)
             let labelRect = NSRect(x: bounds.width - size.width - 8, y: y, width: size.width, height: size.height)
             label.draw(in: labelRect, withAttributes: attributes)
+        } else if textView.string.isEmpty {
+            let line = 0
+            let displayNumber: String
+            if let provided = textView.lineNumberProvider?(line) {
+                displayNumber = provided
+            } else if textView.lineNumberProvider == nil {
+                displayNumber = "1"
+            } else {
+                return
+            }
+            let y = textOrigin.y - visibleRect.minY
+            let label = displayNumber as NSString
+            let size = label.size(withAttributes: attributes)
+            let labelRect = NSRect(x: bounds.width - size.width - 8, y: y, width: size.width, height: size.height)
+            label.draw(in: labelRect, withAttributes: attributes)
         }
     }
+
 }
 
 final class ChangeOverviewView: NSView {

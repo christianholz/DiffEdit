@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		03A5ED7154B2F2B18D307F2A /* StagingDiffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14D32EA7BCDF32E2792CDA52 /* StagingDiffView.swift */; };
 		0569B1531388B7A6469D049A /* DiffEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 557BAD1D6445BFD029234BF4 /* DiffEngine.swift */; };
 		13F7AE02473E0ED2865EBBD2 /* Application.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0CD4275C958E0E1D7507260 /* Application.swift */; };
 		26F73ADB5FFB9794997BAB3D /* EditorViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4334ADE21DDB0F527112B71F /* EditorViews.swift */; };
@@ -31,6 +32,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		14D32EA7BCDF32E2792CDA52 /* StagingDiffView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingDiffView.swift; sourceTree = "<group>"; };
 		4334ADE21DDB0F527112B71F /* EditorViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorViews.swift; sourceTree = "<group>"; };
 		483EB6023A423720097CCCDE /* EditorViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorViewController.swift; sourceTree = "<group>"; };
 		4C18FA256390854BF7B49506 /* TextUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextUtilities.swift; sourceTree = "<group>"; };
@@ -77,6 +79,7 @@
 				769C7B4F47F4F5983068BFA9 /* QuickOpen.swift */,
 				795E3AC7D2342D258B027D79 /* Repository.swift */,
 				F4BBB585E46E0C049FB8C17D /* Sidebar.swift */,
+				14D32EA7BCDF32E2792CDA52 /* StagingDiffView.swift */,
 				4C18FA256390854BF7B49506 /* TextUtilities.swift */,
 			);
 			name = DiffEdit;
@@ -178,6 +181,7 @@
 				E9B811A27C989CABEFC8CAB3 /* QuickOpen.swift in Sources */,
 				FF01389DDA6D5859C3F54B2C /* Repository.swift in Sources */,
 				E2A80F4FE25070331BE79A7C /* Sidebar.swift in Sources */,
+				03A5ED7154B2F2B18D307F2A /* StagingDiffView.swift in Sources */,
 				C53FC33A55A7EF9A117E89CF /* TextUtilities.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

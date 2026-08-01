@@ -3,15 +3,33 @@ import Foundation
 
 final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     var onSelection: ((FileNode) -> Void)?
+    var onStageSelected: (() -> Void)?
+    var onCommit: ((String) -> Void)?
     private let scrollView = NSScrollView()
     private let outlineView = NSOutlineView()
+    private let sidebarHeader = NSTextField(labelWithString: "Files")
+    private let sourceControlPanel = NSView()
+    private let commitMessageField = NSTextField()
+    private let commitDescriptionScroll = NSScrollView()
+    private let commitDescriptionView = NSTextView()
+    private let stageButton = NSButton(title: "Stage Selected Lines", target: nil, action: nil)
+    private let commitButton = NSButton(title: "Commit", target: nil, action: nil)
+    private let sourceControlStatusLabel = NSTextField(labelWithString: "")
     private var root = FileNode.directory(name: "", relativePath: "", url: URL(fileURLWithPath: "/"), children: [])
+    private var outlineRoot = FileNode.directory(name: "", relativePath: "", url: URL(fileURLWithPath: "/"), children: [])
     private var selectedRelativePath: String?
     private var bufferedChangePaths = Set<String>()
     private var isReloading = false
+    private var stagingMode = false
+    private var stageSelectionAvailable = false
+    private var currentBranchName = "HEAD"
+    private var sourceControlPanelHeight: NSLayoutConstraint?
 
     override func loadView() {
         view = NSView()
+        sidebarHeader.translatesAutoresizingMaskIntoConstraints = false
+        sidebarHeader.font = .systemFont(ofSize: 12, weight: .semibold)
+        sidebarHeader.textColor = .secondaryLabelColor
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
         outlineView.headerView = nil
@@ -26,13 +44,104 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         scrollView.documentView = outlineView
+        view.addSubview(sidebarHeader)
         view.addSubview(scrollView)
+        sourceControlPanel.translatesAutoresizingMaskIntoConstraints = false
+        commitMessageField.translatesAutoresizingMaskIntoConstraints = false
+        commitMessageField.placeholderString = "Commit summary (required)"
+        commitMessageField.lineBreakMode = .byTruncatingTail
+        commitDescriptionScroll.translatesAutoresizingMaskIntoConstraints = false
+        commitDescriptionScroll.borderType = .bezelBorder
+        commitDescriptionScroll.hasVerticalScroller = true
+        commitDescriptionScroll.autohidesScrollers = true
+        commitDescriptionView.isRichText = false
+        commitDescriptionView.isAutomaticQuoteSubstitutionEnabled = false
+        commitDescriptionView.font = .systemFont(ofSize: 12)
+        commitDescriptionView.textContainerInset = NSSize(width: 5, height: 5)
+        commitDescriptionView.string = ""
+        commitDescriptionScroll.documentView = commitDescriptionView
+        stageButton.translatesAutoresizingMaskIntoConstraints = false
+        stageButton.bezelStyle = .rounded
+        stageButton.controlSize = .small
+        stageButton.target = self
+        stageButton.action = #selector(stageSelected(_:))
+        stageButton.isEnabled = false
+        commitButton.translatesAutoresizingMaskIntoConstraints = false
+        commitButton.bezelStyle = .rounded
+        commitButton.controlSize = .small
+        commitButton.target = self
+        commitButton.action = #selector(commit(_:))
+        sourceControlStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        sourceControlStatusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        sourceControlStatusLabel.textColor = .secondaryLabelColor
+        sourceControlStatusLabel.lineBreakMode = .byTruncatingTail
+        sourceControlPanel.addSubview(commitMessageField)
+        sourceControlPanel.addSubview(commitDescriptionScroll)
+        sourceControlPanel.addSubview(stageButton)
+        sourceControlPanel.addSubview(commitButton)
+        sourceControlPanel.addSubview(sourceControlStatusLabel)
+        sourceControlPanel.isHidden = true
+        view.addSubview(sourceControlPanel)
+        let panelHeight = sourceControlPanel.heightAnchor.constraint(equalToConstant: 0)
+        sourceControlPanelHeight = panelHeight
         NSLayoutConstraint.activate([
+            sidebarHeader.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
+            sidebarHeader.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            sidebarHeader.topAnchor.constraint(equalTo: view.topAnchor, constant: 6),
+            sidebarHeader.heightAnchor.constraint(equalToConstant: 22),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            scrollView.topAnchor.constraint(equalTo: sidebarHeader.bottomAnchor, constant: 2),
+            scrollView.bottomAnchor.constraint(equalTo: sourceControlPanel.topAnchor),
+            sourceControlPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            sourceControlPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            sourceControlPanel.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            panelHeight,
+            commitMessageField.leadingAnchor.constraint(equalTo: sourceControlPanel.leadingAnchor, constant: 10),
+            commitMessageField.trailingAnchor.constraint(equalTo: sourceControlPanel.trailingAnchor, constant: -10),
+            commitMessageField.topAnchor.constraint(equalTo: sourceControlPanel.topAnchor, constant: 10),
+            commitMessageField.heightAnchor.constraint(equalToConstant: 24),
+            commitDescriptionScroll.leadingAnchor.constraint(equalTo: commitMessageField.leadingAnchor),
+            commitDescriptionScroll.trailingAnchor.constraint(equalTo: commitMessageField.trailingAnchor),
+            commitDescriptionScroll.topAnchor.constraint(equalTo: commitMessageField.bottomAnchor, constant: 7),
+            commitDescriptionScroll.heightAnchor.constraint(equalToConstant: 72),
+            sourceControlStatusLabel.leadingAnchor.constraint(equalTo: commitMessageField.leadingAnchor),
+            sourceControlStatusLabel.trailingAnchor.constraint(equalTo: commitMessageField.trailingAnchor),
+            sourceControlStatusLabel.topAnchor.constraint(equalTo: commitDescriptionScroll.bottomAnchor, constant: 5),
+            stageButton.leadingAnchor.constraint(equalTo: commitMessageField.leadingAnchor),
+            stageButton.trailingAnchor.constraint(equalTo: commitMessageField.trailingAnchor),
+            stageButton.topAnchor.constraint(equalTo: sourceControlStatusLabel.bottomAnchor, constant: 6),
+            commitButton.leadingAnchor.constraint(equalTo: commitMessageField.leadingAnchor),
+            commitButton.trailingAnchor.constraint(equalTo: commitMessageField.trailingAnchor),
+            commitButton.topAnchor.constraint(equalTo: stageButton.bottomAnchor, constant: 6)
         ])
+    }
+
+    func setStageEnabled(_ enabled: Bool) {
+        stageSelectionAvailable = enabled
+        stageButton.isEnabled = stagingMode && enabled
+    }
+
+    func setSourceControlStatus(_ message: String) {
+        sourceControlStatusLabel.stringValue = message
+    }
+
+    func setCurrentBranchName(_ branchName: String) {
+        currentBranchName = branchName
+        updateCommitButtonTitle()
+    }
+
+    func clearCommitMessage() {
+        commitMessageField.stringValue = ""
+        commitDescriptionView.string = ""
+    }
+
+    func setMode(_ mode: WorkspaceMode) {
+        stagingMode = mode == .staging
+        sourceControlPanel.isHidden = !stagingMode
+        sourceControlPanelHeight?.constant = stagingMode ? 210 : 0
+        stageButton.isEnabled = stagingMode && stageSelectionAvailable
+        load(root: root, preservingSelection: selectedRelativePath)
     }
 
     func load(root: FileNode, preservingSelection selection: String? = nil, resetState: Bool = false) {
@@ -40,11 +149,23 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let scrollOrigin = resetState ? .zero : scrollView.contentView.bounds.origin
         selectedRelativePath = resetState ? selection : (selection ?? selectedRelativePath)
         self.root = root
+        outlineRoot = stagingMode ? root.flattenedChanges(additionalPaths: bufferedChangePaths) : root
+        sidebarHeader.stringValue = stagingMode ? "Changes  \(outlineRoot.changedFileCount)" : "Files"
+        updateCommitButtonTitle()
         isReloading = true
         outlineView.reloadData()
         restoreExpandedPaths(expandedPaths)
-        if let selectedRelativePath, let node = root.find(relativePath: selectedRelativePath) {
+        var selectedNode: FileNode?
+        if let selectedRelativePath, let node = outlineRoot.find(relativePath: selectedRelativePath), !node.isDirectory {
+            selectedNode = node
             let row = outlineView.row(forItem: node)
+            if row >= 0 {
+                outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
+        } else if stagingMode, let firstFile = outlineRoot.firstFile {
+            selectedRelativePath = firstFile.relativePath
+            selectedNode = firstFile
+            let row = outlineView.row(forItem: firstFile)
             if row >= 0 {
                 outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             }
@@ -55,11 +176,20 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
         }
         isReloading = false
+        if stagingMode, let selectedNode {
+            DispatchQueue.main.async { [weak self] in
+                self?.onSelection?(selectedNode)
+            }
+        }
     }
 
     func setBufferedChangePaths(_ paths: Set<String>) {
         bufferedChangePaths = paths
         guard isViewLoaded else { return }
+        if stagingMode {
+            load(root: root, preservingSelection: selectedRelativePath)
+            return
+        }
         for row in 0..<outlineView.numberOfRows {
             guard let node = outlineView.item(atRow: row) as? FileNode,
                   let cell = outlineView.view(atColumn: 0, row: row, makeIfNecessary: false) as? FileCellView else {
@@ -69,12 +199,28 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
     }
 
+    @discardableResult
+    func selectFile(relativePath: String) -> Bool {
+        guard isViewLoaded,
+              let node = outlineRoot.find(relativePath: relativePath),
+              !node.isDirectory else { return false }
+        isReloading = true
+        defer { isReloading = false }
+        expandAncestors(of: relativePath, in: outlineRoot)
+        let row = outlineView.row(forItem: node)
+        guard row >= 0 else { return false }
+        selectedRelativePath = relativePath
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        outlineView.scrollRowToVisible(row)
+        return true
+    }
+
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        (item as? FileNode ?? root).children.count
+        (item as? FileNode ?? outlineRoot).children.count
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        (item as? FileNode ?? root).children[index]
+        (item as? FileNode ?? outlineRoot).children[index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -144,7 +290,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     private func currentExpandedPaths() -> Set<String> {
         var paths = Set<String>()
-        collectExpandedPaths(from: root, into: &paths)
+        collectExpandedPaths(from: outlineRoot, into: &paths)
         return paths
     }
 
@@ -159,10 +305,36 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     private func restoreExpandedPaths(_ paths: Set<String>) {
         for path in paths.sorted(by: { $0.count < $1.count }) {
-            if let node = root.find(relativePath: path), node.isDirectory {
+            if let node = outlineRoot.find(relativePath: path), node.isDirectory {
                 outlineView.expandItem(node)
             }
         }
+    }
+
+    private func expandAncestors(of relativePath: String, in node: FileNode) {
+        for child in node.children where child.isDirectory {
+            let containsTarget = relativePath == child.relativePath
+                || relativePath.hasPrefix(child.relativePath + "/")
+            guard containsTarget else { continue }
+            outlineView.expandItem(child)
+            expandAncestors(of: relativePath, in: child)
+            return
+        }
+    }
+
+    private func updateCommitButtonTitle() {
+        commitButton.title = "Commit selected changes to \(currentBranchName)"
+    }
+
+    @objc private func stageSelected(_ sender: Any?) {
+        onStageSelected?()
+    }
+
+    @objc private func commit(_ sender: Any?) {
+        let summary = commitMessageField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let description = commitDescriptionView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = description.isEmpty ? summary : "\(summary)\n\n\(description)"
+        onCommit?(message)
     }
 }
 

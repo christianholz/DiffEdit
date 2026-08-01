@@ -98,6 +98,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AppCommands {
         activeMainController?.nextParagraph(sender)
     }
 
+    func previousChange(_ sender: Any?) {
+        activeMainController?.previousChange(sender)
+    }
+
+    func nextChange(_ sender: Any?) {
+        activeMainController?.nextChange(sender)
+    }
+
     func removeWindowController(for path: String) {
         windowControllersByPath.removeValue(forKey: path)
     }
@@ -211,6 +219,13 @@ enum MainMenu {
         mainMenu.addItem(navigateItem)
         let navigateMenu = NSMenu(title: "Navigate")
         navigateItem.submenu = navigateMenu
+        let previousChange = navigateMenu.addItem(withTitle: "Previous Change", action: #selector(AppCommands.previousChange(_:)), keyEquivalent: ",")
+        previousChange.keyEquivalentModifierMask = [.command, .shift]
+        previousChange.target = appDelegate
+        let nextChange = navigateMenu.addItem(withTitle: "Next Change", action: #selector(AppCommands.nextChange(_:)), keyEquivalent: ".")
+        nextChange.keyEquivalentModifierMask = [.command, .shift]
+        nextChange.target = appDelegate
+        navigateMenu.addItem(.separator())
         let previousParagraph = navigateMenu.addItem(withTitle: "Previous Paragraph", action: #selector(AppCommands.previousParagraph(_:)), keyEquivalent: "\u{F700}")
         previousParagraph.keyEquivalentModifierMask = [.option]
         previousParagraph.target = appDelegate
@@ -247,6 +262,8 @@ enum MainMenu {
     func quickOpen(_ sender: Any?)
     func previousParagraph(_ sender: Any?)
     func nextParagraph(_ sender: Any?)
+    func previousChange(_ sender: Any?)
+    func nextChange(_ sender: Any?)
 }
 
 final class WindowController: NSWindowController, NSWindowDelegate {
@@ -303,6 +320,20 @@ final class MainViewController: NSSplitViewController, AppCommands {
         editor.onBufferedChangesChanged = { [weak self] paths in
             self?.sidebar.setBufferedChangePaths(paths)
         }
+        editor.onStageSelectionAvailabilityChanged = { [weak self] available in
+            self?.sidebar.setStageEnabled(available)
+        }
+        editor.onModeChanged = { [weak self] mode in
+            guard let self else { return }
+            self.sidebar.setMode(mode)
+            self.refreshRepositoryStatus()
+        }
+        sidebar.onStageSelected = { [weak self] in
+            self?.stageSelectedChanges()
+        }
+        sidebar.onCommit = { [weak self] message in
+            self?.commit(message: message)
+        }
     }
 
     func openFolder(_ sender: Any?) {
@@ -355,6 +386,14 @@ final class MainViewController: NSSplitViewController, AppCommands {
         editor.jumpParagraph(up: false)
     }
 
+    func previousChange(_ sender: Any?) {
+        navigateChange(.previous)
+    }
+
+    func nextChange(_ sender: Any?) {
+        navigateChange(.next)
+    }
+
     func confirmClose(window: NSWindow) -> Bool {
         guard editor.hasUnsavedChanges else { return true }
         let count = editor.unsavedFileCount
@@ -383,6 +422,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
     func refreshRepositoryStatus() {
         repository?.refreshStatus()
         if let repository {
+            sidebar.setCurrentBranchName(repository.currentBranchName)
             sidebar.load(root: repository.makeTree())
         }
     }
@@ -391,6 +431,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
         let repo = Repository(rootURL: url)
         repository = repo
         repo.refreshStatus()
+        sidebar.setCurrentBranchName(repo.currentBranchName)
         sidebar.load(root: repo.makeTree(), resetState: true)
         editor.showPlaceholder("Select a file from \(url.lastPathComponent).")
         view.window?.title = "DiffEdit - \(url.path)"
@@ -401,9 +442,13 @@ final class MainViewController: NSSplitViewController, AppCommands {
         openFile(relativePath: node.relativePath, url: node.url)
     }
 
-    private func openFile(relativePath: String, url: URL) {
-        guard let repository else { return }
-        guard !editor.isEditing(relativePath: relativePath) else { return }
+    @discardableResult
+    private func openFile(relativePath: String, url: URL) -> Bool {
+        guard let repository else { return false }
+        if editor.isEditing(relativePath: relativePath) {
+            sidebar.selectFile(relativePath: relativePath)
+            return true
+        }
         do {
             try editor.open(file: url, relativePath: relativePath, repository: repository) { [weak self] in
                 self?.repository?.refreshStatus()
@@ -411,8 +456,67 @@ final class MainViewController: NSSplitViewController, AppCommands {
                     self?.sidebar.load(root: repository.makeTree(), preservingSelection: relativePath)
                 }
             }
+            sidebar.selectFile(relativePath: relativePath)
+            return true
         } catch {
             presentError(error, title: "Couldn’t Open File")
+            return false
+        }
+    }
+
+    private func navigateChange(_ direction: ChangeNavigationDirection) {
+        guard let repository else { return }
+        if editor.navigateToAdjacentChange(direction, animated: true) {
+            return
+        }
+
+        repository.refreshStatus()
+        let changedPaths = repository.unstagedPaths
+            .union(editor.changedDocumentPaths)
+        let changedFiles = repository.makeTree().filesInDisplayOrder.filter {
+            changedPaths.contains($0.relativePath)
+        }
+        let previousPath = editor.currentDocumentPath
+        guard let targetPath = ChangedFileNavigator.adjacentPath(
+            in: changedFiles.map(\.relativePath),
+            from: previousPath,
+            direction: direction
+        ), let targetFile = changedFiles.first(where: { $0.relativePath == targetPath }) else { return }
+
+        guard openFile(relativePath: targetPath, url: targetFile.url) else { return }
+        _ = editor.navigateToEdgeChange(direction, animated: targetPath == previousPath)
+    }
+
+    private func stageSelectedChanges() {
+        guard let repository else { return }
+        do {
+            try editor.stageSelectedChanges(using: repository)
+            repository.refreshStatus()
+            sidebar.load(root: repository.makeTree())
+            sidebar.setSourceControlStatus("Selected lines staged")
+        } catch {
+            presentError(error, title: "Couldn’t Stage Changes")
+        }
+    }
+
+    private func commit(message: String) {
+        guard let repository else { return }
+        do {
+            guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw RepositoryError.emptyCommitMessage
+            }
+            if editor.hasStageableChanges {
+                try editor.stageSelectedChanges(using: repository)
+            }
+            let output = try repository.commit(message: message)
+            repository.refreshStatus()
+            editor.refreshCommittedBases(using: repository)
+            sidebar.load(root: repository.makeTree())
+            sidebar.clearCommitMessage()
+            let summary = output.split(separator: "\n").first.map(String.init) ?? "Commit created"
+            sidebar.setSourceControlStatus(summary)
+        } catch {
+            presentError(error, title: "Couldn’t Commit")
         }
     }
 

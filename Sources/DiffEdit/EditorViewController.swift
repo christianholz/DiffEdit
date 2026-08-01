@@ -1,10 +1,24 @@
 import AppKit
 import Foundation
 
+private struct StageSelection {
+    var available: Set<StagingChangeID>
+    var selected: Set<StagingChangeID>
+}
+
+enum WorkspaceMode: Int {
+    case editing
+    case staging
+}
+
 final class EditorViewController: NSViewController, NSTextViewDelegate {
     var onBufferedChangesChanged: ((Set<String>) -> Void)?
+    var onStageSelectionAvailabilityChanged: ((Bool) -> Void)?
+    var onModeChanged: ((WorkspaceMode) -> Void)?
 
     private let stack = NSStackView()
+    private let modeBar = NSView()
+    private let modeControl = NSSegmentedControl(labels: ["Edit", "Stage & Commit"], trackingMode: .selectOne, target: nil, action: nil)
     private let committedRow = NSStackView()
     private let mainRow = NSStackView()
     private let committedScroll = NSScrollView()
@@ -15,11 +29,13 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     private let textView = LineHighlightTextView()
     private var mainGutter: LineNumberGutterView?
     private let changeOverview = ChangeOverviewView()
+    private let stagingDiffView = StagingDiffView()
     private let statusLabel = NSTextField(labelWithString: "Open a folder to begin.")
     private var currentFileURL: URL?
     private var currentRelativePath: String?
     private var onSaved: (() -> Void)?
     private var buffersByPath: [String: EditorBuffer] = [:]
+    private var stageSelectionsByPath: [String: StageSelection] = [:]
     private var lastReportedBufferedChanges = Set<String>()
     private var baseText = ""
     private var pendingDiffWorkItem: DispatchWorkItem?
@@ -37,6 +53,19 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         stack.orientation = .vertical
         stack.spacing = 0
         view.addSubview(stack)
+
+        modeBar.translatesAutoresizingMaskIntoConstraints = false
+        modeControl.translatesAutoresizingMaskIntoConstraints = false
+        modeControl.selectedSegment = WorkspaceMode.editing.rawValue
+        modeControl.segmentStyle = .texturedRounded
+        modeControl.target = self
+        modeControl.action = #selector(modeChanged(_:))
+        modeBar.addSubview(modeControl)
+        NSLayoutConstraint.activate([
+            modeControl.centerXAnchor.constraint(equalTo: modeBar.centerXAnchor),
+            modeControl.centerYAnchor.constraint(equalTo: modeBar.centerYAnchor),
+            modeControl.widthAnchor.constraint(equalToConstant: 230)
+        ])
 
         committedRow.orientation = .horizontal
         committedRow.spacing = 0
@@ -115,15 +144,23 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         divider.contentView?.wantsLayer = true
         divider.contentView?.layer?.backgroundColor = DiffPalette.divider.cgColor
 
+        stagingDiffView.isHidden = true
+        stagingDiffView.onToggleChange = { [weak self] id in
+            self?.toggleStageSelection(for: id)
+        }
+
+        stack.addArrangedSubview(modeBar)
         stack.addArrangedSubview(committedRow)
         stack.addArrangedSubview(divider)
         stack.addArrangedSubview(mainRow)
         stack.addArrangedSubview(statusLabel)
+        stack.addArrangedSubview(stagingDiffView)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             stack.topAnchor.constraint(equalTo: view.topAnchor),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            modeBar.heightAnchor.constraint(equalToConstant: 38),
             committedRow.heightAnchor.constraint(equalToConstant: 106),
             committedGutter.widthAnchor.constraint(equalToConstant: 46),
             mainGutter.widthAnchor.constraint(equalToConstant: 46),
@@ -146,6 +183,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     func showPlaceholder(_ message: String) {
         pendingDiffWorkItem?.cancel()
         buffersByPath.removeAll()
+        stageSelectionsByPath.removeAll()
         currentFileURL = nil
         currentRelativePath = nil
         baseText = ""
@@ -158,7 +196,9 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         committedTextView.caretMarker = nil
         committedVisibleBaseLines = []
         statusLabel.stringValue = message
+        stagingDiffView.setDocument(filePath: nil, rows: [], selectedChanges: [])
         reportBufferedChanges()
+        onStageSelectionAvailabilityChanged?(false)
     }
 
     func open(file url: URL, relativePath: String, repository: Repository, onSaved: @escaping () -> Void) throws {
@@ -209,6 +249,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         recomputeHighlights()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            guard self.stagingDiffView.isHidden else { return }
             self.view.window?.makeFirstResponder(self.textView)
         }
     }
@@ -245,6 +286,42 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         onSaved?()
     }
 
+    func stageSelectedChanges(using repository: Repository) throws {
+        persistCurrentBuffer()
+        guard let relativePath = currentRelativePath,
+              let buffer = buffersByPath[relativePath] else { return }
+        let plan = DiffEngine.selectiveStagingPlan(base: buffer.baseText, current: buffer.text)
+        let state = updateStageSelection(relativePath: relativePath, selectableChanges: plan.selectableChanges)
+        try repository.stage(text: plan.text(selectedChanges: state.selected), relativePath: relativePath)
+        statusLabel.stringValue = "Staged selected changes in \(relativePath)"
+    }
+
+    var hasStageableChanges: Bool {
+        persistCurrentBuffer()
+        guard let relativePath = currentRelativePath,
+              let buffer = buffersByPath[relativePath] else { return false }
+        return !DiffEngine.selectiveStagingPlan(
+            base: buffer.baseText,
+            current: buffer.text
+        ).selectableChanges.isEmpty
+    }
+
+    func refreshCommittedBases(using repository: Repository) {
+        persistCurrentBuffer()
+        for relativePath in buffersByPath.keys {
+            guard var buffer = buffersByPath[relativePath] else { continue }
+            buffer.baseText = repository.committedText(relativePath: relativePath) ?? ""
+            buffersByPath[relativePath] = buffer
+        }
+        stageSelectionsByPath.removeAll()
+        if let currentRelativePath, let buffer = buffersByPath[currentRelativePath] {
+            baseText = buffer.baseText
+            recomputeHighlights()
+        } else {
+            onStageSelectionAvailabilityChanged?(false)
+        }
+    }
+
     func toggleWordWrap() {
         wordWrap.toggle()
         applyWrapping()
@@ -264,8 +341,43 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         currentFileURL?.lastPathComponent
     }
 
+    var currentDocumentPath: String? {
+        currentRelativePath
+    }
+
+    var changedDocumentPaths: Set<String> {
+        persistCurrentBuffer()
+        return Set(buffersByPath.values.lazy.filter { $0.baseText != $0.text }.map(\.relativePath))
+    }
+
     func isEditing(relativePath: String) -> Bool {
         currentRelativePath == relativePath
+    }
+
+    @discardableResult
+    func navigateToAdjacentChange(_ direction: ChangeNavigationDirection, animated: Bool = true) -> Bool {
+        guard modeControl.selectedSegment == WorkspaceMode.editing.rawValue else { return false }
+        refreshDiffForNavigation()
+        let currentLine = (textView.string as NSString).lineIndex(containing: textView.selectedRange().location)
+        guard let targetLine = ChangedLineNavigator.adjacentTarget(
+            in: navigableChangedLines,
+            from: currentLine,
+            direction: direction
+        ) else { return false }
+        selectLine(targetLine, animated: animated)
+        return true
+    }
+
+    @discardableResult
+    func navigateToEdgeChange(_ direction: ChangeNavigationDirection, animated: Bool) -> Bool {
+        guard modeControl.selectedSegment == WorkspaceMode.editing.rawValue else { return false }
+        refreshDiffForNavigation()
+        guard let targetLine = ChangedLineNavigator.edgeTarget(
+            in: navigableChangedLines,
+            direction: direction
+        ) else { return false }
+        selectLine(targetLine, animated: animated)
+        return true
     }
 
     private var bufferedChangePaths: Set<String> {
@@ -394,8 +506,74 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     private func recomputeHighlights() {
         let workingText = textView.string
         lastDiff = DiffEngine.diff(base: baseText, current: workingText)
+        if let currentRelativePath {
+            let plan = DiffEngine.selectiveStagingPlan(base: baseText, current: workingText)
+            _ = updateStageSelection(relativePath: currentRelativePath, selectableChanges: plan.selectableChanges)
+        }
         applyHighlights(to: workingText)
         updateCommittedContext()
+        updateStagingDiff()
+    }
+
+    private func updateStageSelection(relativePath: String, selectableChanges: Set<StagingChangeID>) -> StageSelection {
+        let previous = stageSelectionsByPath[relativePath]
+        let newlyAvailable = selectableChanges.subtracting(previous?.available ?? [])
+        let selected = (previous?.selected.intersection(selectableChanges) ?? []).union(newlyAvailable)
+        let state = StageSelection(available: selectableChanges, selected: selected)
+        stageSelectionsByPath[relativePath] = state
+        if relativePath == currentRelativePath {
+            onStageSelectionAvailabilityChanged?(!selectableChanges.isEmpty)
+        }
+        return state
+    }
+
+    private func toggleStageSelection(for id: StagingChangeID) {
+        guard let currentRelativePath,
+              var state = stageSelectionsByPath[currentRelativePath],
+              state.available.contains(id) else { return }
+        if state.selected.contains(id) {
+            state.selected.remove(id)
+        } else {
+            state.selected.insert(id)
+        }
+        stageSelectionsByPath[currentRelativePath] = state
+        updateStagingDiff()
+    }
+
+    @objc private func modeChanged(_ sender: NSSegmentedControl) {
+        let mode = WorkspaceMode(rawValue: sender.selectedSegment) ?? .editing
+        let editing = mode == .editing
+        committedRow.isHidden = !editing
+        divider.isHidden = !editing
+        mainRow.isHidden = !editing
+        statusLabel.isHidden = !editing
+        stagingDiffView.isHidden = editing
+        if !editing {
+            persistCurrentBuffer()
+            updateStagingDiff()
+        } else {
+            view.window?.makeFirstResponder(textView)
+        }
+        onModeChanged?(mode)
+    }
+
+    private func updateStagingDiff() {
+        guard !stagingDiffView.isHidden,
+              let currentRelativePath,
+              let buffer = buffersByPath[currentRelativePath] else {
+            if !stagingDiffView.isHidden {
+                stagingDiffView.setDocument(filePath: nil, rows: [], selectedChanges: [])
+            }
+            return
+        }
+        let currentText = textView.string
+        let plan = DiffEngine.selectiveStagingPlan(base: buffer.baseText, current: currentText)
+        let state = updateStageSelection(relativePath: currentRelativePath, selectableChanges: plan.selectableChanges)
+        stagingDiffView.setDocument(
+            filePath: currentRelativePath,
+            rows: plan.diffRows,
+            selectedChanges: state.selected
+        )
     }
 
     private func applyHighlights(to string: String) {
@@ -607,7 +785,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     }
 
     private func jumpToChange(_ shortcut: EditorShortcut) {
-        let changedLines = lastDiff.currentTouchedLines.sorted()
+        let changedLines = navigableChangedLines.sorted()
         guard !changedLines.isEmpty else { return }
         let currentLine = (textView.string as NSString).lineIndex(containing: textView.selectedRange().location)
         let targetLine: Int
@@ -617,11 +795,11 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         case .previousChangedLine:
             targetLine = changedLines.reversed().first(where: { $0 < currentLine }) ?? changedLines[changedLines.count - 1]
         case .nextChangedGroup:
-            let groups = changedLineGroups(changedLines)
-            targetLine = groups.first(where: { $0.lowerBound > currentLine })?.lowerBound ?? groups[0].lowerBound
+            if navigateToAdjacentChange(.next) { return }
+            targetLine = ChangedLineNavigator.edgeTarget(in: navigableChangedLines, direction: .next) ?? changedLines[0]
         case .previousChangedGroup:
-            let groups = changedLineGroups(changedLines)
-            targetLine = groups.reversed().first(where: { $0.upperBound < currentLine })?.lowerBound ?? groups[groups.count - 1].lowerBound
+            if navigateToAdjacentChange(.previous) { return }
+            targetLine = ChangedLineNavigator.edgeTarget(in: navigableChangedLines, direction: .previous) ?? changedLines[changedLines.count - 1]
         case .previousParagraph:
             jumpParagraph(up: true)
             return
@@ -629,33 +807,65 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
             jumpParagraph(up: false)
             return
         }
-        selectLine(targetLine)
+        selectLine(targetLine, animated: true)
     }
 
-    private func changedLineGroups(_ lines: [Int]) -> [ClosedRange<Int>] {
-        guard let first = lines.first else { return [] }
-        var groups: [ClosedRange<Int>] = []
-        var start = first
-        var previous = first
-        for line in lines.dropFirst() {
-            if line == previous + 1 {
-                previous = line
-            } else {
-                groups.append(start...previous)
-                start = line
-                previous = line
-            }
-        }
-        groups.append(start...previous)
-        return groups
+    private var navigableChangedLines: Set<Int> {
+        lastDiff.currentTouchedLines.union(lastDiff.currentDeletionMarkers.map(\.line))
     }
 
-    private func selectLine(_ line: Int) {
+    private func refreshDiffForNavigation() {
+        pendingDiffWorkItem?.cancel()
+        pendingDiffWorkItem = nil
+        persistCurrentBuffer()
+        recomputeHighlights()
+    }
+
+    private func selectLine(_ line: Int, animated: Bool) {
         let nsString = textView.string as NSString
         let lineStart = nsString.lineStartOffset(forLineIndex: line)
         textView.setSelectedRange(NSRange(location: min(lineStart, nsString.length), length: 0))
-        textView.scrollRangeToVisible(textView.selectedRange())
+        view.window?.makeFirstResponder(textView)
         updateCommittedContext()
+        guard animated else {
+            textView.scrollRangeToVisible(textView.selectedRange())
+            return
+        }
+        animateScrollToLine(line)
+    }
+
+    private func animateScrollToLine(_ line: Int) {
+        guard let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer else { return }
+        layoutManager.ensureLayout(for: textContainer)
+        let nsString = textView.string as NSString
+        let range = nsString.lineRange(forLineIndex: line)
+        let lineMidY: CGFloat
+        if range.location != NSNotFound {
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            if glyphRange.length > 0 {
+                let rect = layoutManager.lineFragmentRect(forGlyphAt: glyphRange.location, effectiveRange: nil)
+                lineMidY = textView.textContainerOrigin.y + rect.midY
+            } else {
+                lineMidY = textView.textContainerOrigin.y + layoutManager.usedRect(for: textContainer).maxY
+            }
+        } else {
+            lineMidY = textView.textContainerOrigin.y + layoutManager.usedRect(for: textContainer).maxY
+        }
+        let clipView = mainScroll.contentView
+        let maximumY = max(0, (mainScroll.documentView?.bounds.height ?? 0) - clipView.bounds.height)
+        let targetY = min(maximumY, max(0, lineMidY - clipView.bounds.height / 2))
+        let targetOrigin = NSPoint(x: clipView.bounds.origin.x, y: targetY)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.allowsImplicitAnimation = true
+            clipView.animator().setBoundsOrigin(targetOrigin)
+        } completionHandler: { [weak self] in
+            guard let self else { return }
+            self.mainScroll.reflectScrolledClipView(self.mainScroll.contentView)
+            self.mainGutter?.needsDisplay = true
+            self.changeOverview.needsDisplay = true
+        }
     }
 }
 

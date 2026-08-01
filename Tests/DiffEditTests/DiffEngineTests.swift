@@ -23,6 +23,7 @@ final class DiffEngineTests: XCTestCase {
         XCTAssertEqual(result.baseTouchedLines, [0])
         XCTAssertEqual(highlightedStrings(result.insertedWordRanges, in: current), ["brave"])
         XCTAssertEqual(result.deletedWordRanges.count, 1)
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.inline])
         XCTAssertEqual(result.revertActions.count, 1)
         XCTAssertEqual(result.revertActions.first?.replacement, "old")
     }
@@ -36,12 +37,35 @@ final class DiffEngineTests: XCTestCase {
         XCTAssertEqual(result.revertActions.first?.replacement, "")
     }
 
+    func testPureMidLineDeletionAddsAnInlineMarker() {
+        let result = DiffEngine.diff(
+            base: "alpha removed beta\n",
+            current: "alpha beta\n"
+        )
+
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.line), [0])
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [6])
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.inline])
+    }
+
+    func testEveryMidLineDeletionGetsItsOwnMarker() {
+        let result = DiffEngine.diff(
+            base: "one old two removed three\n",
+            current: "one new two three\n"
+        )
+
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.line), [0, 0])
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [4, 12])
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.inline, .inline])
+    }
+
     func testDeletedLineAddsADeletionMarker() {
         let result = DiffEngine.diff(base: "one\nremoved\ntwo\n", current: "one\ntwo\n")
 
         XCTAssertEqual(result.baseTouchedLines, [1])
         XCTAssertEqual(result.currentDeletionMarkers.map(\.line), [1])
         XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [0])
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.lineBoundaryBefore])
     }
 
     func testDeletionMarkerUsesCurrentPositionAfterEarlierInsertedLines() {
@@ -54,6 +78,7 @@ final class DiffEngineTests: XCTestCase {
 
         XCTAssertEqual(result.currentDeletionMarkers.map(\.line), [55])
         XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [0])
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.lineBoundaryBefore])
     }
 
     func testUTF16RangesMatchNSStringOffsets() {
@@ -78,6 +103,245 @@ final class DiffEngineTests: XCTestCase {
     private func highlightedStrings(_ ranges: [NSRange], in string: String) -> [String] {
         let nsString = string as NSString
         return ranges.map { nsString.substring(with: $0) }
+    }
+}
+
+final class SelectiveStagingTests: XCTestCase {
+    func testChangesAreSelectedByDefaultWhenAllSelectableLinesArePassed() {
+        let current = "one\ninserted\ntwo\n"
+        let plan = DiffEngine.selectiveStagingPlan(base: "one\ntwo\n", current: current)
+
+        XCTAssertEqual(plan.selectableChanges.count, 1)
+        XCTAssertEqual(plan.text(selectedChanges: plan.selectableChanges), current)
+    }
+
+    func testDeselectingAnInsertedLineOmitsItFromStagedText() {
+        let plan = DiffEngine.selectiveStagingPlan(
+            base: "one\ntwo\n",
+            current: "one\ninserted\ntwo\n"
+        )
+
+        XCTAssertEqual(plan.text(selectedChanges: []), "one\ntwo\n")
+    }
+
+    func testDeselectingAReplacementKeepsTheCommittedLine() {
+        let plan = DiffEngine.selectiveStagingPlan(
+            base: "one\nold\nthree\n",
+            current: "one\nnew\nthree\n"
+        )
+
+        XCTAssertEqual(plan.selectableChanges.count, 2)
+        XCTAssertEqual(plan.text(selectedChanges: []), "one\nold\nthree\n")
+        XCTAssertEqual(plan.text(selectedChanges: plan.selectableChanges), "one\nnew\nthree\n")
+    }
+
+    func testDeletedLineCanBeExcludedFromStaging() {
+        let plan = DiffEngine.selectiveStagingPlan(
+            base: "one\nremoved\ntwo\n",
+            current: "one\ntwo\n"
+        )
+
+        XCTAssertEqual(plan.selectableChanges.count, 1)
+        XCTAssertEqual(plan.text(selectedChanges: []), "one\nremoved\ntwo\n")
+        XCTAssertEqual(plan.text(selectedChanges: plan.selectableChanges), "one\ntwo\n")
+    }
+
+    func testOnlySelectedChangedLinesAreIncluded() {
+        let plan = DiffEngine.selectiveStagingPlan(
+            base: "one\ntwo\nthree\nfour\n",
+            current: "one\nTWO\nthree\nadded\nfour\n"
+        )
+
+        XCTAssertEqual(plan.selectableChanges.count, 3)
+        let replacement = Set(plan.selectableChanges.filter {
+            $0.oldLineIndex == 1 || $0.newLineIndex == 1
+        })
+        let addition = Set(plan.selectableChanges.filter { $0.newLineIndex == 3 })
+        XCTAssertEqual(plan.text(selectedChanges: replacement), "one\nTWO\nthree\nfour\n")
+        XCTAssertEqual(plan.text(selectedChanges: addition), "one\ntwo\nthree\nadded\nfour\n")
+    }
+
+    func testDeletingAllContentStillHasASelectableGutterLine() {
+        let plan = DiffEngine.selectiveStagingPlan(base: "one\ntwo\n", current: "")
+
+        XCTAssertEqual(plan.selectableChanges.count, 2)
+        XCTAssertEqual(plan.text(selectedChanges: []), "one\ntwo\n")
+        XCTAssertEqual(plan.text(selectedChanges: plan.selectableChanges), "")
+    }
+
+    func testUnifiedRowsShowReplacementAsDeletionAndInsertion() {
+        let plan = DiffEngine.selectiveStagingPlan(
+            base: "one\nold\nthree\n",
+            current: "one\nnew\nthree\n"
+        )
+        let changedRows = plan.diffRows.filter { $0.kind == .deletion || $0.kind == .insertion }
+
+        XCTAssertEqual(changedRows.count, 2)
+        XCTAssertEqual(changedRows[0].kind, .deletion)
+        XCTAssertEqual(changedRows[0].oldLineNumber, 2)
+        XCTAssertEqual(changedRows[0].selectionID?.kind, .deletion)
+        XCTAssertEqual(changedRows[1].kind, .insertion)
+        XCTAssertEqual(changedRows[1].newLineNumber, 2)
+        XCTAssertEqual(changedRows[1].selectionID?.kind, .insertion)
+        XCTAssertNotEqual(changedRows[0].selectionID, changedRows[1].selectionID)
+    }
+
+    func testConsecutiveDeletedLinesCanBeSelectedIndependently() {
+        let plan = DiffEngine.selectiveStagingPlan(
+            base: "one\nremove-a\nremove-b\ntwo\n",
+            current: "one\ntwo\n"
+        )
+        let deletions = plan.diffRows.filter { $0.kind == .deletion }
+        let firstDeletion = deletions[0].selectionID.map { Set([$0]) } ?? []
+        let secondDeletion = deletions[1].selectionID.map { Set([$0]) } ?? []
+
+        XCTAssertEqual(deletions.count, 2)
+        XCTAssertNotEqual(deletions[0].selectionID, deletions[1].selectionID)
+        XCTAssertEqual(plan.text(selectedChanges: firstDeletion), "one\nremove-b\ntwo\n")
+        XCTAssertEqual(plan.text(selectedChanges: secondDeletion), "one\nremove-a\ntwo\n")
+    }
+
+    func testUnifiedRowsCollapseDistantUnchangedContext() {
+        let base = (1...20).map { "line \($0)\n" }.joined()
+        var currentLines = (1...20).map { "line \($0)\n" }
+        currentLines[9] = "changed\n"
+        let plan = DiffEngine.selectiveStagingPlan(base: base, current: currentLines.joined())
+
+        XCTAssertTrue(plan.diffRows.contains { $0.kind == .separator })
+        XCTAssertLessThan(plan.diffRows.count, 20)
+    }
+}
+
+final class ChangeNavigationTests: XCTestCase {
+    func testAdjacentNavigationSkipsTheRestOfTheCurrentChangedBlock() {
+        let lines: Set<Int> = [2, 3, 7, 8, 12]
+
+        XCTAssertEqual(ChangedLineNavigator.adjacentTarget(in: lines, from: 2, direction: .next), 7)
+        XCTAssertEqual(ChangedLineNavigator.adjacentTarget(in: lines, from: 3, direction: .next), 7)
+        XCTAssertEqual(ChangedLineNavigator.adjacentTarget(in: lines, from: 8, direction: .previous), 2)
+        XCTAssertEqual(ChangedLineNavigator.adjacentTarget(in: lines, from: 11, direction: .previous), 7)
+    }
+
+    func testAdjacentNavigationReturnsNilAtTheFileBoundary() {
+        let lines: Set<Int> = [2, 3, 7, 8]
+
+        XCTAssertNil(ChangedLineNavigator.adjacentTarget(in: lines, from: 8, direction: .next))
+        XCTAssertNil(ChangedLineNavigator.adjacentTarget(in: lines, from: 2, direction: .previous))
+        XCTAssertEqual(ChangedLineNavigator.edgeTarget(in: lines, direction: .next), 2)
+        XCTAssertEqual(ChangedLineNavigator.edgeTarget(in: lines, direction: .previous), 7)
+    }
+
+    func testFileNavigationUsesSidebarOrderAndWraps() {
+        let paths = ["Sources/B.swift", "README.md", "Sources/A.swift"]
+
+        XCTAssertEqual(ChangedFileNavigator.adjacentPath(in: paths, from: "README.md", direction: .next), "Sources/A.swift")
+        XCTAssertEqual(ChangedFileNavigator.adjacentPath(in: paths, from: "README.md", direction: .previous), "Sources/B.swift")
+        XCTAssertEqual(ChangedFileNavigator.adjacentPath(in: paths, from: "Sources/A.swift", direction: .next), "Sources/B.swift")
+        XCTAssertEqual(ChangedFileNavigator.adjacentPath(in: paths, from: nil, direction: .previous), "Sources/A.swift")
+    }
+}
+
+final class FileNodeFilteringTests: XCTestCase {
+    func testFlattenedChangesUseFullPathsAndIncludeBufferedOnlyFiles() {
+        let rootURL = URL(fileURLWithPath: "/tmp/repository")
+        let changed = FileNode(
+            name: "changed.swift",
+            relativePath: "Sources/changed.swift",
+            url: rootURL.appendingPathComponent("Sources/changed.swift"),
+            isDirectory: false,
+            hasUnstagedChange: true,
+            children: []
+        )
+        let buffered = FileNode(
+            name: "buffered.swift",
+            relativePath: "Sources/buffered.swift",
+            url: rootURL.appendingPathComponent("Sources/buffered.swift"),
+            isDirectory: false,
+            hasUnstagedChange: false,
+            children: []
+        )
+        let sources = FileNode.directory(
+            name: "Sources",
+            relativePath: "Sources",
+            url: rootURL.appendingPathComponent("Sources"),
+            children: [changed, buffered]
+        )
+        let root = FileNode.directory(name: "repository", relativePath: "", url: rootURL, children: [sources])
+
+        let flattened = root.flattenedChanges(additionalPaths: ["Sources/buffered.swift"])
+
+        XCTAssertEqual(flattened.children.map(\.name), ["Sources/buffered.swift", "Sources/changed.swift"])
+        XCTAssertEqual(flattened.changedFileCount, 2)
+    }
+}
+
+final class RepositoryStagingTests: XCTestCase {
+    func testStagesInMemoryContentAndCommitsIt() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiffEditRepositoryTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try runGit(["init", "-q"], in: directory)
+        _ = try runGit(["config", "user.name", "DiffEdit Tests"], in: directory)
+        _ = try runGit(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        let fileURL = directory.appendingPathComponent("example.txt")
+        try "one\ntwo\nthree\n".write(to: fileURL, atomically: true, encoding: .utf8)
+        _ = try runGit(["add", "example.txt"], in: directory)
+        _ = try runGit(["commit", "-q", "-m", "Initial"], in: directory)
+
+        let repository = Repository(rootURL: directory)
+        try repository.stage(text: "one\nTWO\nthree\n", relativePath: "example.txt")
+
+        XCTAssertEqual(try runGit(["show", ":example.txt"], in: directory), "one\nTWO\nthree\n")
+        _ = try repository.commit(message: "Stage selected line")
+        XCTAssertEqual(repository.committedText(relativePath: "example.txt"), "one\nTWO\nthree\n")
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), "one\ntwo\nthree\n")
+    }
+
+    func testStagingCommittedTextClearsAFileFromTheIndex() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiffEditRepositoryTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try runGit(["init", "-q"], in: directory)
+        _ = try runGit(["config", "user.name", "DiffEdit Tests"], in: directory)
+        _ = try runGit(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        let fileURL = directory.appendingPathComponent("example.txt")
+        try "base\n".write(to: fileURL, atomically: true, encoding: .utf8)
+        _ = try runGit(["add", "example.txt"], in: directory)
+        _ = try runGit(["commit", "-q", "-m", "Initial"], in: directory)
+        let repository = Repository(rootURL: directory)
+
+        try repository.stage(text: "changed\n", relativePath: "example.txt")
+        XCTAssertEqual(try runGitStatus(["diff", "--cached", "--quiet"], in: directory), 1)
+        try repository.stage(text: "base\n", relativePath: "example.txt")
+
+        XCTAssertEqual(try runGitStatus(["diff", "--cached", "--quiet"], in: directory), 0)
+    }
+
+    private func runGit(_ arguments: [String], in directory: URL, allowFailure: Bool = false) throws -> String {
+        let result = try runGitResult(arguments, in: directory)
+        if !allowFailure, result.status != 0 {
+            throw RepositoryError.commandFailed(result.output)
+        }
+        return result.output
+    }
+
+    private func runGitStatus(_ arguments: [String], in directory: URL) throws -> Int32 {
+        try runGitResult(arguments, in: directory).status
+    }
+
+    private func runGitResult(_ arguments: [String], in directory: URL) throws -> (status: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git", "-C", directory.path] + arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 }
 
@@ -301,5 +565,80 @@ final class TextSelectionSnapshotTests: XCTestCase {
 
         XCTAssertEqual(textView.selectedRange(), caretRange)
         XCTAssertEqual(textView.selectionAffinity, .upstream)
+    }
+}
+
+final class WorkspaceModeUITests: XCTestCase {
+    func testEditModeKeepsMatchingGutterWidthsAndStagingHasItsOwnView() throws {
+        let editor = EditorViewController()
+        editor.loadView()
+        let gutters = descendants(of: editor.view, matching: LineNumberGutterView.self)
+        XCTAssertEqual(gutters.count, 2)
+        XCTAssertTrue(gutters.allSatisfy { $0.width == 46 })
+
+        let modeControl = try XCTUnwrap(descendants(of: editor.view, matching: NSSegmentedControl.self).first)
+        let stagingView = try XCTUnwrap(descendants(of: editor.view, matching: StagingDiffView.self).first)
+        XCTAssertTrue(stagingView.isHidden)
+
+        modeControl.selectedSegment = WorkspaceMode.staging.rawValue
+        _ = modeControl.sendAction(modeControl.action, to: modeControl.target)
+
+        XCTAssertFalse(stagingView.isHidden)
+        XCTAssertTrue(gutters.allSatisfy(\.isHiddenOrHasHiddenAncestor))
+    }
+
+    func testChangeNavigationMenuUsesCommandShiftPeriodAndComma() throws {
+        MainMenu.install()
+        let navigateMenu = try XCTUnwrap(NSApp.mainMenu?.items.compactMap(\.submenu).first {
+            $0.title == "Navigate"
+        })
+        let previous = try XCTUnwrap(navigateMenu.items.first { $0.title == "Previous Change" })
+        let next = try XCTUnwrap(navigateMenu.items.first { $0.title == "Next Change" })
+
+        XCTAssertEqual(previous.keyEquivalent, ",")
+        XCTAssertEqual(previous.keyEquivalentModifierMask, [.command, .shift])
+        XCTAssertEqual(next.keyEquivalent, ".")
+        XCTAssertEqual(next.keyEquivalentModifierMask, [.command, .shift])
+    }
+
+    func testSidebarCanRevealAndSelectAFileInCollapsedFolders() {
+        let rootURL = URL(fileURLWithPath: "/tmp/navigation-repository")
+        let file = FileNode(
+            name: "Changed.swift",
+            relativePath: "Sources/Nested/Changed.swift",
+            url: rootURL.appendingPathComponent("Sources/Nested/Changed.swift"),
+            isDirectory: false,
+            hasUnstagedChange: true,
+            children: []
+        )
+        let nested = FileNode.directory(
+            name: "Nested",
+            relativePath: "Sources/Nested",
+            url: rootURL.appendingPathComponent("Sources/Nested"),
+            children: [file]
+        )
+        let sources = FileNode.directory(
+            name: "Sources",
+            relativePath: "Sources",
+            url: rootURL.appendingPathComponent("Sources"),
+            children: [nested]
+        )
+        let root = FileNode.directory(name: "repository", relativePath: "", url: rootURL, children: [sources])
+        let sidebar = SidebarViewController()
+        sidebar.loadView()
+        sidebar.load(root: root)
+
+        XCTAssertTrue(sidebar.selectFile(relativePath: file.relativePath))
+    }
+
+    private func descendants<T: NSView>(of view: NSView, matching type: T.Type) -> [T] {
+        var result: [T] = []
+        if let match = view as? T {
+            result.append(match)
+        }
+        for subview in view.subviews {
+            result += descendants(of: subview, matching: type)
+        }
+        return result
     }
 }
