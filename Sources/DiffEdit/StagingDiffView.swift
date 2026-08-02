@@ -1,15 +1,30 @@
 import AppKit
 import Foundation
 
+private enum StagingDiffLayout {
+    static let codeLeadingWidth: CGFloat = 160
+    static let trailingInset: CGFloat = 24
+    static let textMeasurementSlack: CGFloat = 6
+}
+
 final class StagingDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate {
-    var onToggleChange: ((StagingChangeID) -> Void)?
+    var onSetChangeSelection: ((StagingChangeID, Bool) -> Void)?
 
     private let header = NSTextField(labelWithString: "No changed file selected")
     private let scrollView = NSScrollView()
     private let tableView = NSTableView()
+    private let diffColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("diff"))
     private let placeholder = NSTextField(labelWithString: "Select a changed file to review its diff.")
     private var rows: [StagingDiffRow] = []
     private var selectedChanges = Set<StagingChangeID>()
+    private var preferredTableWidth: CGFloat = 0
+    private var paintSession: PaintSession?
+
+    private struct PaintSession {
+        let targetSelected: Bool
+        var visitedChanges = Set<StagingChangeID>()
+        var lastRow: Int
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -34,11 +49,10 @@ final class StagingDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         tableView.rowHeight = 22
         tableView.usesAlternatingRowBackgroundColors = false
         tableView.selectionHighlightStyle = .none
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("diff"))
-        column.width = 1400
-        column.minWidth = 700
-        column.resizingMask = []
-        tableView.addTableColumn(column)
+        tableView.columnAutoresizingStyle = .noColumnAutoresizing
+        diffColumn.minWidth = 0
+        diffColumn.resizingMask = []
+        tableView.addTableColumn(diffColumn)
         scrollView.documentView = tableView
 
         placeholder.translatesAutoresizingMaskIntoConstraints = false
@@ -66,12 +80,22 @@ final class StagingDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func layout() {
+        super.layout()
+        updateTableWidth()
+    }
+
     func setDocument(filePath: String?, rows: [StagingDiffRow], selectedChanges: Set<StagingChangeID>) {
+        paintSession = nil
         header.stringValue = filePath ?? "No changed file selected"
         self.rows = rows
         self.selectedChanges = selectedChanges
+        preferredTableWidth = preferredWidth(for: rows)
         placeholder.isHidden = !rows.isEmpty
         tableView.reloadData()
+        needsLayout = true
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: scrollView.contentView.bounds.origin.y))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -91,20 +115,103 @@ final class StagingDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         view.configure(row: item, selected: item.selectionID.map(selectedChanges.contains))
         view.onToggle = { [weak self] in
             guard let id = item.selectionID else { return }
-            self?.onToggleChange?(id)
+            self?.setSelection(!((self?.selectedChanges.contains(id)) ?? false), for: id, row: row)
+        }
+        view.onPaintBegan = { [weak self] event in
+            self?.beginPaint(atRow: self?.tableRow(at: event) ?? -1) ?? false
+        }
+        view.onPaintContinued = { [weak self] event in
+            guard let self else { return }
+            self.continuePaint(toRow: self.tableRow(at: event))
+        }
+        view.onPaintEnded = { [weak self] in
+            self?.endPaint()
         }
         return view
+    }
+
+    @discardableResult
+    func beginPaint(atRow row: Int) -> Bool {
+        guard let id = rows[safe: row]?.selectionID else { return false }
+        let targetSelected = !selectedChanges.contains(id)
+        paintSession = PaintSession(targetSelected: targetSelected, lastRow: row)
+        applyPaint(toRow: row)
+        return true
+    }
+
+    func continuePaint(toRow row: Int) {
+        guard let session = paintSession,
+              rows.indices.contains(row) else { return }
+        let range = min(session.lastRow, row)...max(session.lastRow, row)
+        for crossedRow in range {
+            applyPaint(toRow: crossedRow)
+        }
+        paintSession?.lastRow = row
+    }
+
+    func endPaint() {
+        paintSession = nil
+    }
+
+    private func applyPaint(toRow row: Int) {
+        guard var session = paintSession,
+              let id = rows[safe: row]?.selectionID,
+              session.visitedChanges.insert(id).inserted else { return }
+        paintSession = session
+        setSelection(session.targetSelected, for: id, row: row)
+    }
+
+    private func setSelection(_ selected: Bool, for id: StagingChangeID, row: Int) {
+        if selected {
+            selectedChanges.insert(id)
+        } else {
+            selectedChanges.remove(id)
+        }
+        if let rowView = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? StagingDiffRowView {
+            rowView.setSelected(selected)
+        }
+        onSetChangeSelection?(id, selected)
+    }
+
+    private func tableRow(at event: NSEvent) -> Int {
+        tableView.row(at: tableView.convert(event.locationInWindow, from: nil))
+    }
+
+    private func preferredWidth(for rows: [StagingDiffRow]) -> CGFloat {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        ]
+        let longestCodeWidth = rows.reduce(CGFloat.zero) { width, row in
+            max(width, (row.text as NSString).size(withAttributes: attributes).width)
+        }
+        return ceil(
+            StagingDiffLayout.codeLeadingWidth
+                + longestCodeWidth
+                + StagingDiffLayout.trailingInset
+                + StagingDiffLayout.textMeasurementSlack
+        )
+    }
+
+    private func updateTableWidth() {
+        let width = max(scrollView.contentSize.width, preferredTableWidth)
+        guard width > 0, abs(diffColumn.width - width) > 0.5 else { return }
+        diffColumn.width = width
     }
 }
 
 private final class StagingDiffRowView: NSTableCellView {
     var onToggle: (() -> Void)?
+    var onPaintBegan: ((NSEvent) -> Bool)?
+    var onPaintContinued: ((NSEvent) -> Void)?
+    var onPaintEnded: (() -> Void)?
 
     private let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let oldLine = NSTextField(labelWithString: "")
     private let newLine = NSTextField(labelWithString: "")
     private let sign = NSTextField(labelWithString: "")
     private let code = NSTextField(labelWithString: "")
+    private var rowKind = StagingDiffRowKind.context
+    private var isChangeSelected: Bool?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -146,7 +253,7 @@ private final class StagingDiffRowView: NSTableCellView {
             sign.widthAnchor.constraint(equalToConstant: 18),
             sign.centerYAnchor.constraint(equalTo: centerYAnchor),
             code.leadingAnchor.constraint(equalTo: sign.trailingAnchor, constant: 8),
-            code.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            code.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -StagingDiffLayout.trailingInset),
             code.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
     }
@@ -156,6 +263,8 @@ private final class StagingDiffRowView: NSTableCellView {
     }
 
     func configure(row: StagingDiffRow, selected: Bool?) {
+        rowKind = row.kind
+        isChangeSelected = selected
         checkbox.isHidden = selected == nil
         checkbox.state = selected == true ? .on : .off
         oldLine.stringValue = row.oldLineNumber.map(String.init) ?? ""
@@ -165,23 +274,63 @@ private final class StagingDiffRowView: NSTableCellView {
         switch row.kind {
         case .context:
             sign.stringValue = ""
-            layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
         case .deletion:
             sign.stringValue = "−"
             sign.textColor = .systemRed
-            layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.16).cgColor
         case .insertion:
             sign.stringValue = "+"
             sign.textColor = .systemGreen
-            layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.16).cgColor
         case .separator:
             checkbox.isHidden = true
             oldLine.stringValue = ""
             newLine.stringValue = ""
             sign.stringValue = ""
             code.textColor = .secondaryLabelColor
+        }
+        updateBackground()
+    }
+
+    func setSelected(_ selected: Bool) {
+        isChangeSelected = selected
+        checkbox.state = selected ? .on : .off
+        updateBackground()
+    }
+
+    private func updateBackground() {
+        switch rowKind {
+        case .context:
+            layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        case .deletion:
+            let alpha: CGFloat = isChangeSelected == true ? 0.16 : 0.07
+            layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(alpha).cgColor
+        case .insertion:
+            let alpha: CGFloat = isChangeSelected == true ? 0.16 : 0.07
+            layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(alpha).cgColor
+        case .separator:
             layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if !checkbox.isHidden, checkbox.frame.contains(point) {
+            return checkbox.hitTest(convert(point, to: checkbox))
+        }
+        return bounds.contains(point) ? self : nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard onPaintBegan?(event) == true else {
+            super.mouseDown(with: event)
+            return
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        onPaintContinued?(event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        onPaintEnded?()
     }
 
     @objc private func toggle(_ sender: Any?) {

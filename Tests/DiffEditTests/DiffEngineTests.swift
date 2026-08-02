@@ -23,7 +23,7 @@ final class DiffEngineTests: XCTestCase {
         XCTAssertEqual(result.baseTouchedLines, [0])
         XCTAssertEqual(highlightedStrings(result.insertedWordRanges, in: current), ["brave"])
         XCTAssertEqual(result.deletedWordRanges.count, 1)
-        XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.inline])
+        XCTAssertTrue(result.currentDeletionMarkers.isEmpty)
         XCTAssertEqual(result.revertActions.count, 1)
         XCTAssertEqual(result.revertActions.first?.replacement, "old")
     }
@@ -65,9 +65,19 @@ final class DiffEngineTests: XCTestCase {
             current: "one new two three\n"
         )
 
-        XCTAssertEqual(result.currentDeletionMarkers.map(\.line), [0, 0])
-        XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [4, 12])
-        XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.inline, .inline])
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.line), [0])
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [12])
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.inline])
+    }
+
+    func testRewrittenSentenceKeepsOnlyItsPureDeletionMarker() {
+        let base = #"Across eight downstream tasks, \name matches or outperforms the task-specific models that have dominated prior work, even when we exclude the target dataset from pretraining and train each head on a fraction of the labels."#
+        let current = "The resulting frozen encoder supports eight downstream tasks spanning classification, regression, dense prediction, and 3D hand-pose estimation through lightweight task-specific heads."
+
+        let result = DiffEngine.diff(base: base, current: current)
+
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [116])
+        XCTAssertTrue(result.currentDeletionMarkers.allSatisfy { $0.kind == .inline })
     }
 
     func testDeletedLineAddsADeletionMarker() {
@@ -77,6 +87,15 @@ final class DiffEngineTests: XCTestCase {
         XCTAssertEqual(result.currentDeletionMarkers.map(\.line), [1])
         XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [0])
         XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.lineBoundaryBefore])
+    }
+
+    func testMixedLineReplacementDoesNotAddAHorizontalDeletionMarker() {
+        let result = DiffEngine.diff(
+            base: "one\nremove a\nremove b\ntwo\n",
+            current: "one\nreplacement\ntwo\n"
+        )
+
+        XCTAssertTrue(result.currentDeletionMarkers.isEmpty)
     }
 
     func testDeletionMarkerUsesCurrentPositionAfterEarlierInsertedLines() {
@@ -682,21 +701,133 @@ final class TextSelectionSnapshotTests: XCTestCase {
 
 final class WorkspaceModeUITests: XCTestCase {
     func testEditModeKeepsMatchingGutterWidthsAndStagingHasItsOwnView() throws {
-        let editor = EditorViewController()
-        editor.loadView()
-        let gutters = descendants(of: editor.view, matching: LineNumberGutterView.self)
+        let main = MainViewController()
+        _ = main.view
+        main.view.frame = NSRect(x: 0, y: 0, width: 1_200, height: 800)
+        main.view.layoutSubtreeIfNeeded()
+        let sidebarContainer = try XCTUnwrap(main.splitViewItems.first?.viewController.view)
+        let editorContainer = try XCTUnwrap(main.splitViewItems.last?.viewController.view)
+        let gutters = descendants(of: editorContainer, matching: LineNumberGutterView.self)
         XCTAssertEqual(gutters.count, 2)
         XCTAssertTrue(gutters.allSatisfy { $0.width == 46 })
+        XCTAssertTrue(gutters.allSatisfy { $0.layer?.masksToBounds == true })
+        let editorRows = descendants(of: editorContainer, matching: NSStackView.self).filter {
+            $0.orientation == .horizontal
+        }
+        XCTAssertEqual(editorRows.count, 2)
+        XCTAssertTrue(editorRows.allSatisfy { $0.layer?.masksToBounds == true })
 
-        let modeControl = try XCTUnwrap(descendants(of: editor.view, matching: NSSegmentedControl.self).first)
-        let stagingView = try XCTUnwrap(descendants(of: editor.view, matching: StagingDiffView.self).first)
+        let modeControl = try XCTUnwrap(descendants(of: main.view, matching: NSSegmentedControl.self).first)
+        XCTAssertTrue(modeControl.isDescendant(of: sidebarContainer))
+        XCTAssertFalse(modeControl.isDescendant(of: editorContainer))
+        let stagingView = try XCTUnwrap(descendants(of: editorContainer, matching: StagingDiffView.self).first)
         XCTAssertTrue(stagingView.isHidden)
 
         modeControl.selectedSegment = WorkspaceMode.staging.rawValue
         _ = modeControl.sendAction(modeControl.action, to: modeControl.target)
+        main.view.layoutSubtreeIfNeeded()
 
         XCTAssertFalse(stagingView.isHidden)
+        XCTAssertEqual(stagingView.frame.width, stagingView.superview?.bounds.width ?? 0, accuracy: 1)
         XCTAssertTrue(gutters.allSatisfy(\.isHiddenOrHasHiddenAncestor))
+    }
+
+    func testCommitButtonUsesCurrentBranchName() throws {
+        let sidebar = SidebarViewController()
+        sidebar.loadView()
+        sidebar.setCurrentBranchName("feature/sidebar-tabs")
+
+        let commitButton = try XCTUnwrap(descendants(of: sidebar.view, matching: NSButton.self).first {
+            $0.title.hasPrefix("Commit selected changes to ")
+        })
+        XCTAssertEqual(commitButton.title, "Commit selected changes to feature/sidebar-tabs")
+    }
+
+    func testStagingDiffColumnFillsWideViewport() throws {
+        let stagingView = StagingDiffView(frame: NSRect(x: 0, y: 0, width: 1_800, height: 600))
+        stagingView.setDocument(
+            filePath: "example.txt",
+            rows: [StagingDiffRow(
+                kind: .context,
+                oldLineNumber: 1,
+                newLineNumber: 1,
+                text: "short line",
+                selectionID: nil
+            )],
+            selectedChanges: []
+        )
+        stagingView.layoutSubtreeIfNeeded()
+        let scrollView = try XCTUnwrap(descendants(of: stagingView, matching: NSScrollView.self).first)
+        let tableView = try XCTUnwrap(descendants(of: stagingView, matching: NSTableView.self).first)
+        let column = try XCTUnwrap(tableView.tableColumns.first)
+
+        XCTAssertGreaterThanOrEqual(column.width, scrollView.contentSize.width - 1)
+    }
+
+    func testUncheckedStagingRowIsDimmerAndLongTextKeepsTrailingMargin() throws {
+        let id = StagingChangeID(kind: .insertion, oldLineIndex: nil, newLineIndex: 0, text: "added")
+        let longText = String(repeating: "wide text ", count: 60)
+        let row = StagingDiffRow(
+            kind: .insertion,
+            oldLineNumber: nil,
+            newLineNumber: 1,
+            text: longText,
+            selectionID: id
+        )
+        let stagingView = StagingDiffView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        stagingView.setDocument(filePath: "example.txt", rows: [row], selectedChanges: [id])
+        stagingView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(descendants(of: stagingView, matching: NSTableView.self).first)
+        let column = try XCTUnwrap(tableView.tableColumns.first)
+        let rowView = try XCTUnwrap(tableView.view(atColumn: 0, row: 0, makeIfNecessary: true))
+        let selectedBackground = try XCTUnwrap(rowView.layer?.backgroundColor).alpha
+
+        XCTAssertTrue(stagingView.beginPaint(atRow: 0))
+        stagingView.endPaint()
+        let unselectedBackground = try XCTUnwrap(rowView.layer?.backgroundColor).alpha
+
+        let measuredTextWidth = (longText as NSString).size(withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        ]).width
+        XCTAssertLessThan(unselectedBackground, selectedBackground)
+        XCTAssertGreaterThanOrEqual(column.width - measuredTextWidth, 188)
+    }
+
+    func testDraggingAcrossStagingRowsPaintsOneSelectionStateWithoutRetoggling() {
+        let ids = [
+            StagingChangeID(kind: .insertion, oldLineIndex: nil, newLineIndex: 0, text: "added one"),
+            StagingChangeID(kind: .deletion, oldLineIndex: 1, newLineIndex: nil, text: "removed"),
+            StagingChangeID(kind: .insertion, oldLineIndex: nil, newLineIndex: 2, text: "added two")
+        ]
+        let rows = [
+            StagingDiffRow(kind: .insertion, oldLineNumber: nil, newLineNumber: 1, text: "added one", selectionID: ids[0]),
+            StagingDiffRow(kind: .context, oldLineNumber: 2, newLineNumber: 2, text: "context", selectionID: nil),
+            StagingDiffRow(kind: .deletion, oldLineNumber: 3, newLineNumber: nil, text: "removed", selectionID: ids[1]),
+            StagingDiffRow(kind: .insertion, oldLineNumber: nil, newLineNumber: 3, text: "added two", selectionID: ids[2])
+        ]
+        let stagingView = StagingDiffView()
+        var changes: [(StagingChangeID, Bool)] = []
+        stagingView.onSetChangeSelection = { changes.append(($0, $1)) }
+        stagingView.setDocument(filePath: "example.txt", rows: rows, selectedChanges: Set(ids))
+
+        XCTAssertTrue(stagingView.beginPaint(atRow: 0))
+        stagingView.continuePaint(toRow: 3)
+        stagingView.continuePaint(toRow: 1)
+        stagingView.endPaint()
+
+        XCTAssertEqual(changes.count, 3)
+        XCTAssertEqual(Set(changes.map(\.0)), Set(ids))
+        XCTAssertTrue(changes.allSatisfy { !$0.1 })
+
+        changes.removeAll()
+        stagingView.setDocument(filePath: "example.txt", rows: rows, selectedChanges: [])
+        XCTAssertTrue(stagingView.beginPaint(atRow: 3))
+        stagingView.continuePaint(toRow: 0)
+        stagingView.endPaint()
+
+        XCTAssertEqual(changes.count, 3)
+        XCTAssertEqual(Set(changes.map(\.0)), Set(ids))
+        XCTAssertTrue(changes.allSatisfy(\.1))
     }
 
     func testChangeNavigationMenuUsesCommandShiftPeriodAndComma() throws {
@@ -831,6 +962,51 @@ final class WorkspaceModeUITests: XCTestCase {
         XCTAssertTrue(try editor.refreshCurrentFileFromDisk(using: Repository(rootURL: directory)))
         XCTAssertEqual(editableTextView.string, externalText)
         XCTAssertEqual(editableTextView.selectedRange(), NSRange(location: originalCaret, length: 0))
+    }
+
+    func testOnlyEditableViewHighlightsActiveLogicalLine() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiffEditActiveLineTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("example.txt")
+        try "first\nsecond\nthird\n".write(to: fileURL, atomically: true, encoding: .utf8)
+        let editor = EditorViewController()
+        editor.loadView()
+        XCTAssertTrue(try editor.open(
+            file: fileURL,
+            relativePath: "example.txt",
+            repository: Repository(rootURL: directory),
+            onSaved: {}
+        ))
+        let textViews = descendants(of: editor.view, matching: LineHighlightTextView.self)
+        let editableTextView = try XCTUnwrap(textViews.first(where: \.isEditable))
+        let committedTextView = try XCTUnwrap(textViews.first(where: { !$0.isEditable }))
+
+        XCTAssertTrue(editableTextView.showsActiveLineHighlight)
+        XCTAssertFalse(committedTextView.showsActiveLineHighlight)
+        editableTextView.setSelectedRange(NSRange(location: ("first\n" as NSString).length + 2, length: 0))
+        editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: editableTextView))
+
+        XCTAssertEqual(editableTextView.activeLine, 1)
+        XCTAssertNil(committedTextView.activeLine)
+
+        editableTextView.setSelectedRange(NSRange(location: (editableTextView.string as NSString).length, length: 0))
+        editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: editableTextView))
+
+        let trailingLine = (editableTextView.string as NSString).lineCount
+        let trailingRect = try XCTUnwrap(editableTextView.logicalLineRect(for: trailingLine))
+        let layoutManager = try XCTUnwrap(editableTextView.layoutManager)
+        XCTAssertEqual(editableTextView.activeLine, trailingLine)
+        XCTAssertEqual(
+            trailingRect.minY,
+            editableTextView.textContainerOrigin.y + layoutManager.extraLineFragmentRect.minY,
+            accuracy: 0.5
+        )
+        XCTAssertLessThan(trailingRect.minY, editableTextView.textContainerOrigin.y + layoutManager.usedRect(for: try XCTUnwrap(editableTextView.textContainer)).maxY)
+
+        let statusLabel = try XCTUnwrap(descendants(of: editor.view, matching: NSTextField.self).first { $0.stringValue == "example.txt" })
+        XCTAssertEqual(statusLabel.alignment, .left)
     }
 
     private func descendants<T: NSView>(of view: NSView, matching type: T.Type) -> [T] {

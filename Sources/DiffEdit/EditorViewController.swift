@@ -22,12 +22,9 @@ enum WorkspaceMode: Int {
 final class EditorViewController: NSViewController, NSTextViewDelegate {
     var onBufferedChangesChanged: ((Set<String>) -> Void)?
     var onStageSelectionAvailabilityChanged: ((Bool) -> Void)?
-    var onModeChanged: ((WorkspaceMode) -> Void)?
     var resolveExternalFileConflict: ((ExternalFileConflict) -> ExternalFileResolution)?
 
     private let stack = NSStackView()
-    private let modeBar = NSView()
-    private let modeControl = NSSegmentedControl(labels: ["Edit", "Stage & Commit"], trackingMode: .selectOne, target: nil, action: nil)
     private let committedRow = NSStackView()
     private let mainRow = NSStackView()
     private let committedScroll = NSScrollView()
@@ -56,33 +53,26 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     private var committedVisibleBaseLines: [Int?] = []
     private var foregroundEditorState: ForegroundEditorState?
     private let editorContentMargin: CGFloat = 24
+    private var mode = WorkspaceMode.editing
 
     override func loadView() {
         view = NSView()
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical
+        stack.alignment = .width
         stack.spacing = 0
         view.addSubview(stack)
-
-        modeBar.translatesAutoresizingMaskIntoConstraints = false
-        modeControl.translatesAutoresizingMaskIntoConstraints = false
-        modeControl.selectedSegment = WorkspaceMode.editing.rawValue
-        modeControl.segmentStyle = .texturedRounded
-        modeControl.target = self
-        modeControl.action = #selector(modeChanged(_:))
-        modeBar.addSubview(modeControl)
-        NSLayoutConstraint.activate([
-            modeControl.centerXAnchor.constraint(equalTo: modeBar.centerXAnchor),
-            modeControl.centerYAnchor.constraint(equalTo: modeBar.centerYAnchor),
-            modeControl.widthAnchor.constraint(equalToConstant: 230)
-        ])
 
         committedRow.orientation = .horizontal
         committedRow.spacing = 0
         committedRow.translatesAutoresizingMaskIntoConstraints = false
+        committedRow.wantsLayer = true
+        committedRow.layer?.masksToBounds = true
         mainRow.orientation = .horizontal
         mainRow.spacing = 0
         mainRow.translatesAutoresizingMaskIntoConstraints = false
+        mainRow.wantsLayer = true
+        mainRow.layer?.masksToBounds = true
 
         committedScroll.hasVerticalScroller = false
         committedScroll.borderType = .noBorder
@@ -117,6 +107,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         mainScroll.backgroundColor = .textBackgroundColor
         textView.isRichText = false
         textView.drawsBackground = false
+        textView.showsActiveLineHighlight = true
         textView.shortcutHandler = { [weak self] shortcut in
             self?.jumpToChange(shortcut)
         }
@@ -148,6 +139,8 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.backgroundColor = .windowBackgroundColor
         statusLabel.drawsBackground = true
+        statusLabel.alignment = .left
+        statusLabel.lineBreakMode = .byTruncatingMiddle
         statusLabel.setContentHuggingPriority(.required, for: .vertical)
         divider.boxType = .separator
         divider.translatesAutoresizingMaskIntoConstraints = false
@@ -155,11 +148,10 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         divider.contentView?.layer?.backgroundColor = DiffPalette.divider.cgColor
 
         stagingDiffView.isHidden = true
-        stagingDiffView.onToggleChange = { [weak self] id in
-            self?.toggleStageSelection(for: id)
+        stagingDiffView.onSetChangeSelection = { [weak self] id, selected in
+            self?.setStageSelection(for: id, selected: selected)
         }
 
-        stack.addArrangedSubview(modeBar)
         stack.addArrangedSubview(committedRow)
         stack.addArrangedSubview(divider)
         stack.addArrangedSubview(mainRow)
@@ -170,7 +162,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             stack.topAnchor.constraint(equalTo: view.topAnchor),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            modeBar.heightAnchor.constraint(equalToConstant: 38),
+            stagingDiffView.widthAnchor.constraint(equalTo: stack.widthAnchor),
             committedRow.heightAnchor.constraint(equalToConstant: 106),
             committedGutter.widthAnchor.constraint(equalToConstant: 46),
             mainGutter.widthAnchor.constraint(equalToConstant: 46),
@@ -200,6 +192,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         textView.string = ""
         committedTextView.string = ""
         textView.fullLineHighlightedLines = []
+        textView.activeLine = nil
         committedTextView.fullLineHighlightedLines = []
         textView.deletionMarkers = []
         committedTextView.deletionMarkers = []
@@ -297,6 +290,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         mainScroll.contentView.scroll(to: buffer.scrollOrigin)
         mainScroll.reflectScrolledClipView(mainScroll.contentView)
         textView.undoManager?.removeAllActions()
+        updateActiveLineHighlight()
         statusLabel.stringValue = buffer.relativePath
         recomputeHighlights()
         DispatchQueue.main.async { [weak self] in
@@ -546,7 +540,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
 
     @discardableResult
     func navigateToAdjacentChange(_ direction: ChangeNavigationDirection, animated: Bool = true) -> Bool {
-        guard modeControl.selectedSegment == WorkspaceMode.editing.rawValue else { return false }
+        guard mode == .editing else { return false }
         refreshDiffForNavigation()
         let currentLine = (textView.string as NSString).lineIndex(containing: textView.selectedRange().location)
         guard let targetLine = ChangedLineNavigator.adjacentTarget(
@@ -560,7 +554,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
 
     @discardableResult
     func navigateToEdgeChange(_ direction: ChangeNavigationDirection, animated: Bool) -> Bool {
-        guard modeControl.selectedSegment == WorkspaceMode.editing.rawValue else { return false }
+        guard mode == .editing else { return false }
         refreshDiffForNavigation()
         guard let targetLine = ChangedLineNavigator.edgeTarget(
             in: navigableChangedLines,
@@ -666,6 +660,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         let refreshImmediately = pendingLineStructureChange
         pendingLineStructureChange = false
         updateTypingAttributesForSelection()
+        updateActiveLineHighlight()
         persistCurrentBuffer()
         pendingDiffWorkItem?.cancel()
         if refreshImmediately {
@@ -691,7 +686,14 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
 
     func textViewDidChangeSelection(_ notification: Notification) {
         updateTypingAttributesForSelection()
+        updateActiveLineHighlight()
         updateCommittedContext()
+    }
+
+    private func updateActiveLineHighlight() {
+        let line = (textView.string as NSString).lineIndex(containing: textView.selectedRange().location)
+        textView.activeLine = line
+        mainGutter?.needsDisplay = true
     }
 
     func jumpParagraph(up: Bool) {
@@ -778,21 +780,20 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         return state
     }
 
-    private func toggleStageSelection(for id: StagingChangeID) {
+    private func setStageSelection(for id: StagingChangeID, selected: Bool) {
         guard let currentRelativePath,
               var state = stageSelectionsByPath[currentRelativePath],
               state.available.contains(id) else { return }
-        if state.selected.contains(id) {
-            state.selected.remove(id)
-        } else {
+        if selected {
             state.selected.insert(id)
+        } else {
+            state.selected.remove(id)
         }
         stageSelectionsByPath[currentRelativePath] = state
-        updateStagingDiff()
     }
 
-    @objc private func modeChanged(_ sender: NSSegmentedControl) {
-        let mode = WorkspaceMode(rawValue: sender.selectedSegment) ?? .editing
+    func setMode(_ mode: WorkspaceMode) {
+        self.mode = mode
         let editing = mode == .editing
         committedRow.isHidden = !editing
         divider.isHidden = !editing
@@ -805,7 +806,6 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         } else {
             view.window?.makeFirstResponder(textView)
         }
-        onModeChanged?(mode)
     }
 
     private func updateStagingDiff() {

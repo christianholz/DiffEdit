@@ -21,9 +21,21 @@ final class LineHighlightTextView: NSTextView {
             needsDisplay = true
         }
     }
+    var showsActiveLineHighlight = false {
+        didSet {
+            needsDisplay = true
+        }
+    }
+    var activeLine: Int? {
+        didSet {
+            guard oldValue != activeLine else { return }
+            needsDisplay = true
+        }
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         drawFullLineHighlights(in: dirtyRect)
+        drawActiveLineHighlight(in: dirtyRect)
         super.draw(dirtyRect)
         drawDeletionMarkers(in: dirtyRect)
         drawCaretMarker(in: dirtyRect)
@@ -146,6 +158,46 @@ final class LineHighlightTextView: NSTextView {
         }
     }
 
+    private func drawActiveLineHighlight(in dirtyRect: NSRect) {
+        guard showsActiveLineHighlight,
+              let activeLine else { return }
+        let visibleBounds = enclosingScrollView?.contentView.bounds ?? visibleRect
+        guard var lineRect = logicalLineRect(for: activeLine) else { return }
+        lineRect.origin.x = visibleBounds.minX
+        lineRect.size.width = visibleBounds.width
+        lineRect = lineRect.integral
+        guard lineRect.intersects(dirtyRect) else { return }
+        DiffPalette.activeLineOverlay.setFill()
+        lineRect.fill()
+    }
+
+    func logicalLineRect(for line: Int) -> NSRect? {
+        guard let layoutManager,
+              let textContainer else { return nil }
+        layoutManager.ensureLayout(for: textContainer)
+        let nsString = string as NSString
+        let isEmptyLine = string.isEmpty && line == 0
+        let isTrailingEmptyLine = string.hasSuffix("\n") && line == nsString.lineCount
+        if isEmptyLine || isTrailingEmptyLine {
+            let lineHeight = layoutManager.defaultLineHeight(for: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize))
+            let extraRect = layoutManager.extraLineFragmentTextContainer === textContainer
+                ? layoutManager.extraLineFragmentRect
+                : .zero
+            let fallbackY = max(0, layoutManager.usedRect(for: textContainer).maxY - lineHeight)
+            let y = textContainerOrigin.y + (extraRect.isEmpty ? fallbackY : extraRect.minY)
+            return NSRect(x: textContainerOrigin.x, y: y, width: max(extraRect.width, 1), height: max(extraRect.height, lineHeight))
+        }
+        let characterRange = nsString.lineRange(forLineIndex: line)
+        guard characterRange.location != NSNotFound else { return nil }
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange, actualCharacterRange: nil)
+        if glyphRange.length > 0 {
+            var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            rect.origin.y += textContainerOrigin.y
+            return rect
+        }
+        return nil
+    }
+
     private func drawDeletionMarkers(in dirtyRect: NSRect) {
         guard !deletionMarkers.isEmpty,
               let layoutManager,
@@ -179,7 +231,7 @@ final class LineHighlightTextView: NSTextView {
             let characterLocation = min(lineRange.location + clampedColumn, nsString.length)
             guard var markerRect = markerRect(characterLocation: characterLocation, textOrigin: textOrigin, layoutManager: layoutManager, textContainer: textContainer) else { continue }
             markerRect.origin.x -= 1
-            markerRect.size.width = 3
+            markerRect.size.width = 4
             if markerRect.intersects(dirtyRect) {
                 markerRect.fill()
             }
@@ -285,6 +337,7 @@ final class LineNumberGutterView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: 46, height: 100))
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
+        layer?.masksToBounds = true
         postsFrameChangedNotifications = true
     }
 
@@ -301,6 +354,9 @@ final class LineNumberGutterView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: bounds).addClip()
+        defer { NSGraphicsContext.restoreGraphicsState() }
         guard let textView,
               let scrollView,
               let layoutManager = textView.layoutManager,
@@ -315,6 +371,11 @@ final class LineNumberGutterView: NSView {
             .font: NSFont.monospacedDigitSystemFont(ofSize: max(9, (textView.font?.pointSize ?? 13) - 2), weight: .regular),
             .foregroundColor: DiffPalette.lineNumber
         ]
+        drawActiveLineBackground(
+            for: textView,
+            scrollView: scrollView,
+            dirtyRect: dirtyRect
+        )
         let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect.offsetBy(dx: -textOrigin.x, dy: -textOrigin.y), in: textContainer)
         var drawnLogicalLines = Set<Int>()
         layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { _, usedRect, _, fragmentGlyphRange, _ in
@@ -380,6 +441,26 @@ final class LineNumberGutterView: NSView {
             let labelRect = NSRect(x: bounds.width - size.width - 8, y: y, width: size.width, height: size.height)
             label.draw(in: labelRect, withAttributes: attributes)
         }
+    }
+
+    private func drawActiveLineBackground(
+        for textView: LineHighlightTextView,
+        scrollView: NSScrollView,
+        dirtyRect: NSRect
+    ) {
+        guard textView.showsActiveLineHighlight,
+              let activeLine = textView.activeLine else { return }
+        let visibleRect = scrollView.contentView.bounds
+        guard let textRect = textView.logicalLineRect(for: activeLine) else { return }
+        let rect = NSRect(
+            x: bounds.minX,
+            y: textRect.minY - visibleRect.minY,
+            width: bounds.width,
+            height: textRect.height
+        ).integral
+        guard rect.intersects(dirtyRect) else { return }
+        DiffPalette.activeLineGutter.setFill()
+        rect.fill()
     }
 
 }

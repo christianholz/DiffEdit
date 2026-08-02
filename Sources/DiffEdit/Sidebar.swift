@@ -3,8 +3,10 @@ import Foundation
 
 final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     var onSelection: ((FileNode) -> Void)?
+    var onModeChanged: ((WorkspaceMode) -> Void)?
     var onStageSelected: (() -> Void)?
     var onCommit: ((String) -> Void)?
+    private let modeControl = NSSegmentedControl(labels: ["Edit", "Stage & Commit"], trackingMode: .selectOne, target: nil, action: nil)
     private let scrollView = NSScrollView()
     private let outlineView = NSOutlineView()
     private let sidebarHeader = NSTextField(labelWithString: "Files")
@@ -27,6 +29,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     override func loadView() {
         view = NSView()
+        modeControl.translatesAutoresizingMaskIntoConstraints = false
+        modeControl.selectedSegment = WorkspaceMode.editing.rawValue
+        modeControl.segmentStyle = .texturedRounded
+        modeControl.target = self
+        modeControl.action = #selector(modeChanged(_:))
         sidebarHeader.translatesAutoresizingMaskIntoConstraints = false
         sidebarHeader.font = .systemFont(ofSize: 12, weight: .semibold)
         sidebarHeader.textColor = .secondaryLabelColor
@@ -44,6 +51,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         scrollView.documentView = outlineView
+        view.addSubview(modeControl)
         view.addSubview(sidebarHeader)
         view.addSubview(scrollView)
         sourceControlPanel.translatesAutoresizingMaskIntoConstraints = false
@@ -85,9 +93,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let panelHeight = sourceControlPanel.heightAnchor.constraint(equalToConstant: 0)
         sourceControlPanelHeight = panelHeight
         NSLayoutConstraint.activate([
+            modeControl.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
+            modeControl.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
+            modeControl.topAnchor.constraint(equalTo: view.topAnchor, constant: 7),
+            modeControl.heightAnchor.constraint(equalToConstant: 25),
             sidebarHeader.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
             sidebarHeader.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
-            sidebarHeader.topAnchor.constraint(equalTo: view.topAnchor, constant: 6),
+            sidebarHeader.topAnchor.constraint(equalTo: modeControl.bottomAnchor, constant: 5),
             sidebarHeader.heightAnchor.constraint(equalToConstant: 22),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -137,11 +149,18 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     func setMode(_ mode: WorkspaceMode) {
+        modeControl.selectedSegment = mode.rawValue
         stagingMode = mode == .staging
         sourceControlPanel.isHidden = !stagingMode
         sourceControlPanelHeight?.constant = stagingMode ? 210 : 0
         stageButton.isEnabled = stagingMode && stageSelectionAvailable
         load(root: root, preservingSelection: selectedRelativePath)
+    }
+
+    @objc private func modeChanged(_ sender: NSSegmentedControl) {
+        let mode = WorkspaceMode(rawValue: sender.selectedSegment) ?? .editing
+        setMode(mode)
+        onModeChanged?(mode)
     }
 
     func load(root: FileNode, preservingSelection selection: String? = nil, resetState: Bool = false) {

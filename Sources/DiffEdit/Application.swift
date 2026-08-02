@@ -152,8 +152,9 @@ enum MainMenu {
 
     static func install() {
         let mainMenu = NSMenu()
-        NSApp.mainMenu = mainMenu
-        let appDelegate = NSApp.delegate as AnyObject?
+        let application = NSApplication.shared
+        application.mainMenu = mainMenu
+        let appDelegate = application.delegate as AnyObject?
 
         let appItem = NSMenuItem()
         mainMenu.addItem(appItem)
@@ -329,9 +330,9 @@ final class MainViewController: NSSplitViewController, AppCommands {
         editor.onStageSelectionAvailabilityChanged = { [weak self] available in
             self?.sidebar.setStageEnabled(available)
         }
-        editor.onModeChanged = { [weak self] mode in
+        sidebar.onModeChanged = { [weak self] mode in
             guard let self else { return }
-            self.sidebar.setMode(mode)
+            self.editor.setMode(mode)
             self.refreshRepositoryStatus()
         }
         editor.resolveExternalFileConflict = { [weak self] conflict in
@@ -516,6 +517,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
                 self?.invalidateActivationRefresh()
                 self?.repository?.refreshStatus()
                 if let repository = self?.repository {
+                    self?.sidebar.setCurrentBranchName(repository.currentBranchName)
                     self?.sidebar.load(root: repository.makeTree(), preservingSelection: relativePath)
                 }
             }) else { return false }
@@ -535,6 +537,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
         }
 
         repository.refreshStatus()
+        sidebar.setCurrentBranchName(repository.currentBranchName)
         let changedPaths = repository.unstagedPaths
             .union(editor.changedDocumentPaths)
         let changedFiles = repository.makeTree().filesInDisplayOrder.filter {
@@ -557,6 +560,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
         do {
             try editor.stageSelectedChanges(using: repository)
             repository.refreshStatus()
+            sidebar.setCurrentBranchName(repository.currentBranchName)
             sidebar.load(root: repository.makeTree())
             sidebar.setSourceControlStatus("Selected lines staged")
         } catch {
@@ -581,6 +585,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
             }
             let output = try repository.commit(message: message)
             repository.refreshStatus()
+            sidebar.setCurrentBranchName(repository.currentBranchName)
             editor.refreshCommittedBases(using: repository)
             sidebar.load(root: repository.makeTree())
             sidebar.clearCommitMessage()

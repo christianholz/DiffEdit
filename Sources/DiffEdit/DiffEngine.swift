@@ -330,8 +330,10 @@ enum DiffEngine {
             for item in pendingInserts {
                 result.currentTouchedLines.insert(item.0)
             }
+            let isPureLineDeletion = !pendingDeletes.isEmpty && pendingInserts.isEmpty
             var addedBoundaryDeletionMarker = false
             let boundaryDeletionMarker: DeletionMarker? = {
+                guard isPureLineDeletion else { return nil }
                 guard !currentLines.isEmpty else {
                     return DeletionMarker(line: 0, column: 0, kind: .lineBoundaryBefore)
                 }
@@ -429,10 +431,8 @@ enum DiffEngine {
             guard !pendingDeletedRanges.isEmpty || !pendingInsertedRanges.isEmpty else { return }
             deleted += pendingDeletedRanges
             inserted += pendingInsertedRanges
-            if !pendingDeletedRanges.isEmpty {
-                if let firstInserted = pendingInsertedRanges.first {
-                    markerColumns.append(firstInserted.location)
-                } else if newIndex < newTokens.count {
+            if !pendingDeletedRanges.isEmpty, pendingInsertedRanges.isEmpty {
+                if newIndex < newTokens.count {
                     markerColumns.append(newTokens[newIndex].range.location)
                 } else if newIndex > 0 {
                     markerColumns.append(NSMaxRange(newTokens[newIndex - 1].range))
@@ -465,12 +465,80 @@ enum DiffEngine {
             }
         }
         flushInlineChangeBlock()
+        let semanticMarkerColumns = semanticDeletionMarkerColumns(old: old, new: new)
         return (
             normalizedHighlightRanges(ranges: deleted, in: old),
             normalizedHighlightRanges(ranges: inserted, in: new),
-            Array(Set(markerColumns)).sorted(),
+            semanticMarkerColumns.isEmpty ? Array(Set(markerColumns)).sorted() : semanticMarkerColumns,
             columnMap
         )
+    }
+
+    private static func semanticDeletionMarkerColumns(old: String, new: String) -> [Int] {
+        let oldTokens = semanticTokens(old)
+        let newTokens = semanticTokens(new)
+        let operations = sequenceDiff(old: oldTokens.map(\.text), new: newTokens.map(\.text))
+        var markerColumns: [Int] = []
+        var newIndex = 0
+        var pendingDeletion = false
+        var firstInsertedColumn: Int?
+
+        func flushChangeBlock() {
+            guard pendingDeletion, firstInsertedColumn == nil else {
+                pendingDeletion = false
+                firstInsertedColumn = nil
+                return
+            }
+            if newIndex < newTokens.count {
+                markerColumns.append(newTokens[newIndex].range.location)
+            } else if newIndex > 0 {
+                markerColumns.append(NSMaxRange(newTokens[newIndex - 1].range))
+            } else {
+                markerColumns.append(0)
+            }
+            pendingDeletion = false
+            firstInsertedColumn = nil
+        }
+
+        for operation in operations {
+            switch operation {
+            case .equal:
+                flushChangeBlock()
+                newIndex += 1
+            case .delete:
+                pendingDeletion = true
+            case .insert:
+                if firstInsertedColumn == nil {
+                    firstInsertedColumn = newTokens[newIndex].range.location
+                }
+                newIndex += 1
+            }
+        }
+        flushChangeBlock()
+        return Array(Set(markerColumns)).sorted()
+    }
+
+    private static func semanticTokens(_ string: String) -> [(text: String, range: NSRange)] {
+        let nsString = string as NSString
+        var tokens: [(String, NSRange)] = []
+        var index = 0
+        while index < nsString.length {
+            while index < nsString.length {
+                let character = nsString.substring(with: NSRange(location: index, length: 1))
+                guard character.rangeOfCharacter(from: .whitespacesAndNewlines) != nil else { break }
+                index += 1
+            }
+            guard index < nsString.length else { break }
+            let start = index
+            while index < nsString.length {
+                let character = nsString.substring(with: NSRange(location: index, length: 1))
+                guard character.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { break }
+                index += 1
+            }
+            let range = NSRange(location: start, length: index - start)
+            tokens.append((nsString.substring(with: range), range))
+        }
+        return tokens
     }
 
     private static func replacementText(for insertedRange: NSRange, deletedRanges: [NSRange], oldLine: String) -> String {

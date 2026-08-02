@@ -3,6 +3,8 @@ import Foundation
 
 enum DiffPalette {
     static let changedLine = dynamic(light: "#e5e5e5", dark: "#2a2d2e")
+    static let activeLineOverlay = dynamic(light: "#6e77811f", dark: "#ffffff0d")
+    static let activeLineGutter = dynamic(light: "#d8dee4", dark: "#34373a")
     static let insertedText = dynamic(light: "#aceebb80", dark: "#2ea04340")
     static let deletedText = dynamic(light: "#ffcecb80", dark: "#f8514940")
     static let deletionMarker = dynamic(light: "#cf222e99", dark: "#f8514980")
