@@ -5,12 +5,12 @@ private enum StagingDiffLayout {
     static let codeLeadingWidth: CGFloat = 160
     static let trailingInset: CGFloat = 24
     static let textMeasurementSlack: CGFloat = 6
+    static let viewportTrailingInset: CGFloat = 12
 }
 
 final class StagingDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     var onSetChangeSelection: ((StagingChangeID, Bool) -> Void)?
 
-    private let header = NSTextField(labelWithString: "No changed file selected")
     private let scrollView = NSScrollView()
     private let tableView = NSTableView()
     private let diffColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("diff"))
@@ -31,11 +31,6 @@ final class StagingDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
 
-        header.translatesAutoresizingMaskIntoConstraints = false
-        header.font = .systemFont(ofSize: 12, weight: .medium)
-        header.textColor = .secondaryLabelColor
-        header.lineBreakMode = .byTruncatingMiddle
-
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
@@ -50,6 +45,7 @@ final class StagingDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         tableView.usesAlternatingRowBackgroundColors = false
         tableView.selectionHighlightStyle = .none
         tableView.columnAutoresizingStyle = .noColumnAutoresizing
+        tableView.style = .plain
         diffColumn.minWidth = 0
         diffColumn.resizingMask = []
         tableView.addTableColumn(diffColumn)
@@ -59,17 +55,12 @@ final class StagingDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         placeholder.textColor = .tertiaryLabelColor
         placeholder.alignment = .center
 
-        addSubview(header)
         addSubview(scrollView)
         addSubview(placeholder)
         NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            header.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            header.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            header.heightAnchor.constraint(equalToConstant: 20),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 6),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -StagingDiffLayout.viewportTrailingInset),
+            scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
             placeholder.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             placeholder.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor)
@@ -85,9 +76,8 @@ final class StagingDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         updateTableWidth()
     }
 
-    func setDocument(filePath: String?, rows: [StagingDiffRow], selectedChanges: Set<StagingChangeID>) {
+    func setDocument(rows: [StagingDiffRow], selectedChanges: Set<StagingChangeID>) {
         paintSession = nil
-        header.stringValue = filePath ?? "No changed file selected"
         self.rows = rows
         self.selectedChanges = selectedChanges
         preferredTableWidth = preferredWidth(for: rows)

@@ -1,6 +1,17 @@
 import AppKit
 import Foundation
 
+final class EditorSplitView: NSSplitView {
+    override var dividerThickness: CGFloat { 5 }
+
+    override func drawDivider(in rect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        rect.fill()
+        DiffPalette.divider.setFill()
+        NSRect(x: rect.minX, y: rect.midY - 1, width: rect.width, height: 2).integral.fill()
+    }
+}
+
 final class LineHighlightTextView: NSTextView {
     var lineNumberProvider: ((Int) -> String?)?
     var shortcutHandler: ((EditorShortcut) -> Void)?
@@ -230,7 +241,7 @@ final class LineHighlightTextView: NSTextView {
             let clampedColumn = max(0, min(marker.column, lineRange.length))
             let characterLocation = min(lineRange.location + clampedColumn, nsString.length)
             guard var markerRect = markerRect(characterLocation: characterLocation, textOrigin: textOrigin, layoutManager: layoutManager, textContainer: textContainer) else { continue }
-            markerRect.origin.x -= 1
+            markerRect.origin.x -= 2
             markerRect.size.width = 4
             if markerRect.intersects(dirtyRect) {
                 markerRect.fill()

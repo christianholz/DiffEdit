@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">DiffEdit app icon</title>
+  <desc id="description">A text insertion caret rewriting a red line into a teal line on a dark editor surface.</desc>
+
+  <defs>
+    <linearGradient id="shell" x1="180" y1="80" x2="835" y2="958" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#424750"/>
+      <stop offset="0.42" stop-color="#2a2e36"/>
+      <stop offset="1" stop-color="#181b21"/>
+    </linearGradient>
+    <linearGradient id="surface" x1="230" y1="145" x2="800" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#272b32"/>
+      <stop offset="0.55" stop-color="#1b1f25"/>
+      <stop offset="1" stop-color="#12151a"/>
+    </linearGradient>
+    <linearGradient id="mutedLine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#535861"/>
+      <stop offset="0.5" stop-color="#454a53"/>
+      <stop offset="1" stop-color="#343942"/>
+    </linearGradient>
+    <linearGradient id="oldLine" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff7a67"/>
+      <stop offset="0.55" stop-color="#f05e53"/>
+      <stop offset="1" stop-color="#db443f"/>
+    </linearGradient>
+    <linearGradient id="newLine" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#11e5bd"/>
+      <stop offset="0.55" stop-color="#0fd4b2"/>
+      <stop offset="1" stop-color="#09bfa7"/>
+    </linearGradient>
+    <linearGradient id="caret" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#aeb6bd"/>
+      <stop offset="0.24" stop-color="#f7f9fa"/>
+      <stop offset="0.55" stop-color="#d9dee2"/>
+      <stop offset="1" stop-color="#7c858d"/>
+    </linearGradient>
+    <linearGradient id="caretEdge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.82"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.1"/>
+      <stop offset="1" stop-color="#07090c" stop-opacity="0.7"/>
+    </linearGradient>
+
+    <filter id="shellShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000000" flood-opacity="0.48"/>
+    </filter>
+    <filter id="innerShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="12" stdDeviation="15" flood-color="#000000" flood-opacity="0.62"/>
+    </filter>
+    <filter id="lineShadow" x="-20%" y="-30%" width="140%" height="170%">
+      <feDropShadow dx="0" dy="9" stdDeviation="9" flood-color="#000000" flood-opacity="0.58"/>
+    </filter>
+    <filter id="editGlow" x="-30%" y="-80%" width="160%" height="260%">
+      <feGaussianBlur stdDeviation="17"/>
+    </filter>
+    <filter id="caretShadow" x="-100%" y="-30%" width="300%" height="170%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#000000" flood-opacity="0.68"/>
+    </filter>
+  </defs>
+
+  <!-- The transparent canvas outside this path becomes the macOS icon margin. -->
+  <path
+    d="M292 22H732C902 22 1002 122 1002 292V732C1002 902 902 1002 732 1002H292C122 1002 22 902 22 732V292C22 122 122 22 292 22Z"
+    fill="url(#shell)"
+    filter="url(#shellShadow)"
+  />
+  <path
+    d="M292 34H732C894 34 990 130 990 292V732C990 894 894 990 732 990H292C130 990 34 894 34 732V292C34 130 130 34 292 34Z"
+    fill="none"
+    stroke="#737983"
+    stroke-opacity="0.5"
+    stroke-width="4"
+  />
+
+  <rect x="82" y="83" width="860" height="858" rx="170" fill="#101318" filter="url(#innerShadow)"/>
+  <rect x="93" y="94" width="838" height="836" rx="160" fill="url(#surface)"/>
+  <rect
+    x="94.5"
+    y="95.5"
+    width="835"
+    height="833"
+    rx="158.5"
+    fill="none"
+    stroke="#4b5058"
+    stroke-opacity="0.34"
+    stroke-width="3"
+  />
+
+  <!-- Muted source lines keep the editor context subordinate to the active edit. -->
+  <g fill="url(#mutedLine)" filter="url(#lineShadow)">
+    <rect x="163" y="229" width="197" height="54" rx="27"/>
+    <rect x="397" y="229" width="404" height="54" rx="27"/>
+    <rect x="163" y="751" width="184" height="54" rx="27"/>
+    <rect x="390" y="751" width="433" height="54" rx="27"/>
+  </g>
+  <g fill="none" stroke="#747a83" stroke-opacity="0.28" stroke-width="2">
+    <rect x="164" y="230" width="195" height="52" rx="26"/>
+    <rect x="398" y="230" width="402" height="52" rx="26"/>
+    <rect x="164" y="752" width="182" height="52" rx="26"/>
+    <rect x="391" y="752" width="431" height="52" rx="26"/>
+  </g>
+
+  <!-- A soft edit-point glow ties the old and new segments to the caret. -->
+  <ellipse cx="512" cy="512" rx="96" ry="56" fill="#11d9bb" opacity="0.2" filter="url(#editGlow)"/>
+
+  <!-- Old text on the left; newly written text on the right. -->
+  <g filter="url(#lineShadow)">
+    <path
+      d="M188 459H512V565H188C159 565 135 541 135 512C135 483 159 459 188 459Z"
+      fill="url(#oldLine)"
+    />
+    <path
+      d="M512 459H836C865 459 889 483 889 512C889 541 865 565 836 565H512V459Z"
+      fill="url(#newLine)"
+    />
+  </g>
+  <path d="M188 461H512" fill="none" stroke="#ffb0a0" stroke-opacity="0.58" stroke-width="3"/>
+  <path d="M512 461H836" fill="none" stroke="#77ffe5" stroke-opacity="0.54" stroke-width="3"/>
+
+  <!-- The insertion caret is deliberately the highest-contrast element. -->
+  <g filter="url(#caretShadow)">
+    <rect x="490" y="406" width="44" height="212" rx="15" fill="#626b73"/>
+    <rect x="494" y="410" width="36" height="204" rx="12" fill="url(#caret)"/>
+    <rect
+      x="497"
+      y="413"
+      width="30"
+      height="198"
+      rx="10"
+      fill="none"
+      stroke="url(#caretEdge)"
+      stroke-width="3"
+    />
+  </g>
+</svg>

@@ -70,14 +70,18 @@ final class DiffEngineTests: XCTestCase {
         XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.inline])
     }
 
-    func testRewrittenSentenceKeepsOnlyItsPureDeletionMarker() {
+    func testRewrittenSentenceKeepsReplacementPunctuationAndHasNoDeletionMarker() {
         let base = #"Across eight downstream tasks, \name matches or outperforms the task-specific models that have dominated prior work, even when we exclude the target dataset from pretraining and train each head on a fraction of the labels."#
         let current = "The resulting frozen encoder supports eight downstream tasks spanning classification, regression, dense prediction, and 3D hand-pose estimation through lightweight task-specific heads."
 
         let result = DiffEngine.diff(base: base, current: current)
+        let nsCurrent = current as NSString
+        let comma = nsCurrent.range(of: ", and")
+        let conjunction = nsCurrent.range(of: "and", options: [], range: comma)
 
-        XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [116])
-        XCTAssertTrue(result.currentDeletionMarkers.allSatisfy { $0.kind == .inline })
+        XCTAssertTrue(result.insertedWordRanges.contains { NSLocationInRange(comma.location, $0) })
+        XCTAssertFalse(result.insertedWordRanges.contains { NSIntersectionRange($0, conjunction).length > 0 })
+        XCTAssertTrue(result.currentDeletionMarkers.isEmpty)
     }
 
     func testDeletedLineAddsADeletionMarker() {
@@ -96,6 +100,38 @@ final class DiffEngineTests: XCTestCase {
         )
 
         XCTAssertTrue(result.currentDeletionMarkers.isEmpty)
+    }
+
+    func testInlineDeletionMarkersNeverTouchInsertedText() {
+        let cases = [
+            ("alpha old beta\n", "alpha new beta\n"),
+            ("one old two removed three\n", "one new two three\n"),
+            ("alpha beta alpha gamma\n", "alpha new alpha\n"),
+            (
+                #"Across eight downstream tasks, \name matches or outperforms the task-specific models that have dominated prior work, even when we exclude the target dataset from pretraining and train each head on a fraction of the labels."#,
+                "The resulting frozen encoder supports eight downstream tasks spanning classification, regression, dense prediction, and 3D hand-pose estimation through lightweight task-specific heads."
+            )
+        ]
+
+        for (base, current) in cases {
+            let result = DiffEngine.diff(base: base, current: current)
+            let nsCurrent = current as NSString
+            for marker in result.currentDeletionMarkers where marker.kind == .inline {
+                for insertion in result.insertedWordRanges {
+                    let insertionEnd = NSMaxRange(insertion)
+                    XCTAssertFalse(marker.column >= insertion.location && marker.column <= insertionEnd)
+                    let gap: NSRange
+                    if marker.column < insertion.location {
+                        gap = NSRange(location: marker.column, length: insertion.location - marker.column)
+                    } else {
+                        gap = NSRange(location: insertionEnd, length: marker.column - insertionEnd)
+                    }
+                    guard NSMaxRange(gap) <= nsCurrent.length else { continue }
+                    let gapText = nsCurrent.substring(with: gap)
+                    XCTAssertNotNil(gapText.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted))
+                }
+            }
+        }
     }
 
     func testDeletionMarkerUsesCurrentPositionAfterEarlierInsertedLines() {
@@ -743,10 +779,112 @@ final class WorkspaceModeUITests: XCTestCase {
         XCTAssertEqual(commitButton.title, "Commit selected changes to feature/sidebar-tabs")
     }
 
+    func testEditorDividerResizesContextEnforcesMinimumsAndRestoresHeight() throws {
+        let defaults = UserDefaults.standard
+        let defaultsKey = EditorViewController.committedPaneHeightDefaultsKey
+        let previousValue = defaults.object(forKey: defaultsKey)
+        defaults.removeObject(forKey: defaultsKey)
+        defer {
+            if let previousValue {
+                defaults.set(previousValue, forKey: defaultsKey)
+            } else {
+                defaults.removeObject(forKey: defaultsKey)
+            }
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiffEditDividerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runGitForUITest(["init", "-q"], in: directory)
+        try runGitForUITest(["config", "user.name", "DiffEdit Tests"], in: directory)
+        try runGitForUITest(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        let fileURL = directory.appendingPathComponent("example.txt")
+        let contents = (1...40).map { "line \($0)\n" }.joined()
+        try contents.write(to: fileURL, atomically: true, encoding: .utf8)
+        try runGitForUITest(["add", "example.txt"], in: directory)
+        try runGitForUITest(["commit", "-q", "-m", "Initial"], in: directory)
+
+        let editor = EditorViewController()
+        editor.loadView()
+        editor.view.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        editor.view.layoutSubtreeIfNeeded()
+        XCTAssertTrue(try editor.open(
+            file: fileURL,
+            relativePath: "example.txt",
+            repository: Repository(rootURL: directory),
+            onSaved: {}
+        ))
+        let splitView = try XCTUnwrap(descendants(of: editor.view, matching: EditorSplitView.self).first)
+        let textViews = descendants(of: editor.view, matching: LineHighlightTextView.self)
+        let editableTextView = try XCTUnwrap(textViews.first(where: \.isEditable))
+        let committedTextView = try XCTUnwrap(textViews.first(where: { !$0.isEditable }))
+        let committedRow = splitView.subviews[0]
+        let mainRow = splitView.subviews[1]
+        let editableLineHeight = try XCTUnwrap(editableTextView.layoutManager).defaultLineHeight(for: try XCTUnwrap(editableTextView.font)) + 2
+        let committedLineHeight = try XCTUnwrap(committedTextView.layoutManager).defaultLineHeight(for: try XCTUnwrap(committedTextView.font)) + 2
+        XCTAssertTrue(committedTextView.isDescendant(of: committedRow))
+        XCTAssertTrue(editableTextView.isDescendant(of: mainRow))
+        XCTAssertLessThan(committedRow.frame.minY, mainRow.frame.minY)
+        XCTAssertEqual(
+            committedRow.frame.height,
+            ceil(committedTextView.textContainerInset.height * 2 + committedLineHeight * 5),
+            accuracy: 1
+        )
+
+        splitView.setPosition(0, ofDividerAt: 0)
+        XCTAssertGreaterThanOrEqual(
+            committedRow.frame.height,
+            committedTextView.textContainerInset.height * 2 + committedLineHeight * 2 - 1
+        )
+        splitView.setPosition(splitView.bounds.height, ofDividerAt: 0)
+        XCTAssertGreaterThanOrEqual(
+            mainRow.frame.height,
+            editableTextView.textContainerInset.height * 2 + editableLineHeight * 5 - 1
+        )
+
+        let caretLocation = (contents as NSString).lineStartOffset(forLineIndex: 20)
+        editableTextView.setSelectedRange(NSRange(location: caretLocation, length: 0))
+        editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: editableTextView))
+        splitView.setPosition(70, ofDividerAt: 0)
+        let compactContextLineCount = (committedTextView.string as NSString).lineCount
+        splitView.setPosition(220, ofDividerAt: 0)
+        let expandedContextLineCount = (committedTextView.string as NSString).lineCount
+
+        XCTAssertGreaterThan(expandedContextLineCount, compactContextLineCount)
+        XCTAssertEqual(committedTextView.caretMarker?.line, expandedContextLineCount / 2)
+        let committedViewport = try XCTUnwrap(committedTextView.enclosingScrollView?.contentView.bounds)
+        let centeredLineRect = try XCTUnwrap(
+            committedTextView.logicalLineRect(for: try XCTUnwrap(committedTextView.caretMarker?.line))
+        )
+        XCTAssertEqual(
+            centeredLineRect.midY - committedViewport.minY,
+            committedViewport.height / 2,
+            accuracy: 1
+        )
+
+        let persistedHeight: CGFloat = 180
+        splitView.setPosition(persistedHeight, ofDividerAt: 0)
+        let snappedPersistedHeight = committedRow.frame.height
+        XCTAssertEqual(defaults.double(forKey: defaultsKey), snappedPersistedHeight, accuracy: 1)
+        let snappedContentHeight = snappedPersistedHeight - committedTextView.textContainerInset.height * 2
+        XCTAssertEqual(
+            snappedContentHeight / committedLineHeight,
+            (snappedContentHeight / committedLineHeight).rounded(),
+            accuracy: 0.01
+        )
+
+        let restoredEditor = EditorViewController()
+        restoredEditor.loadView()
+        restoredEditor.view.frame = editor.view.frame
+        restoredEditor.view.layoutSubtreeIfNeeded()
+        let restoredSplit = try XCTUnwrap(descendants(of: restoredEditor.view, matching: EditorSplitView.self).first)
+        XCTAssertEqual(restoredSplit.subviews[0].frame.height, snappedPersistedHeight, accuracy: 1)
+    }
+
     func testStagingDiffColumnFillsWideViewport() throws {
         let stagingView = StagingDiffView(frame: NSRect(x: 0, y: 0, width: 1_800, height: 600))
         stagingView.setDocument(
-            filePath: "example.txt",
             rows: [StagingDiffRow(
                 kind: .context,
                 oldLineNumber: 1,
@@ -760,8 +898,13 @@ final class WorkspaceModeUITests: XCTestCase {
         let scrollView = try XCTUnwrap(descendants(of: stagingView, matching: NSScrollView.self).first)
         let tableView = try XCTUnwrap(descendants(of: stagingView, matching: NSTableView.self).first)
         let column = try XCTUnwrap(tableView.tableColumns.first)
+        let rowView = try XCTUnwrap(tableView.view(atColumn: 0, row: 0, makeIfNecessary: true))
 
         XCTAssertGreaterThanOrEqual(column.width, scrollView.contentSize.width - 1)
+        XCTAssertEqual(tableView.style, .plain)
+        XCTAssertEqual(scrollView.frame.minX, stagingView.bounds.minX, accuracy: 0.5)
+        XCTAssertEqual(scrollView.frame.maxX, stagingView.bounds.maxX - 12, accuracy: 0.5)
+        XCTAssertEqual(rowView.frame.minX, tableView.bounds.minX, accuracy: 0.5)
     }
 
     func testUncheckedStagingRowIsDimmerAndLongTextKeepsTrailingMargin() throws {
@@ -775,7 +918,7 @@ final class WorkspaceModeUITests: XCTestCase {
             selectionID: id
         )
         let stagingView = StagingDiffView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
-        stagingView.setDocument(filePath: "example.txt", rows: [row], selectedChanges: [id])
+        stagingView.setDocument(rows: [row], selectedChanges: [id])
         stagingView.layoutSubtreeIfNeeded()
         let tableView = try XCTUnwrap(descendants(of: stagingView, matching: NSTableView.self).first)
         let column = try XCTUnwrap(tableView.tableColumns.first)
@@ -808,7 +951,7 @@ final class WorkspaceModeUITests: XCTestCase {
         let stagingView = StagingDiffView()
         var changes: [(StagingChangeID, Bool)] = []
         stagingView.onSetChangeSelection = { changes.append(($0, $1)) }
-        stagingView.setDocument(filePath: "example.txt", rows: rows, selectedChanges: Set(ids))
+        stagingView.setDocument(rows: rows, selectedChanges: Set(ids))
 
         XCTAssertTrue(stagingView.beginPaint(atRow: 0))
         stagingView.continuePaint(toRow: 3)
@@ -820,7 +963,7 @@ final class WorkspaceModeUITests: XCTestCase {
         XCTAssertTrue(changes.allSatisfy { !$0.1 })
 
         changes.removeAll()
-        stagingView.setDocument(filePath: "example.txt", rows: rows, selectedChanges: [])
+        stagingView.setDocument(rows: rows, selectedChanges: [])
         XCTAssertTrue(stagingView.beginPaint(atRow: 3))
         stagingView.continuePaint(toRow: 0)
         stagingView.endPaint()
@@ -1018,5 +1161,20 @@ final class WorkspaceModeUITests: XCTestCase {
             result += descendants(of: subview, matching: type)
         }
         return result
+    }
+
+    private func runGitForUITest(_ arguments: [String], in directory: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git", "-C", directory.path] + arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw RepositoryError.commandFailed(String(data: output, encoding: .utf8) ?? "")
+        }
     }
 }

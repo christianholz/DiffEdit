@@ -1,80 +1,112 @@
 # DiffEdit
 
-DiffEdit is a native macOS text editor that keeps the current file beside a
-small committed-context view and highlights working-tree changes against Git
-`HEAD`.
+DiffEdit is a native macOS text editor built around one idea: source changes are
+easier to understand when the code you are writing and the code you started
+from stay visible together.
 
-## Build in Xcode
+Open a folder inside a Git repository and DiffEdit compares every edited file
+with `HEAD` as you type. It highlights line- and word-level changes, keeps the
+relevant committed context above the editor, and lets you review, stage, and
+commit selected lines without leaving the app.
+
+> DiffEdit is currently an early-stage project for macOS 13 and newer.
+
+## Highlights
+
+- **Git-aware editing** — additions, edits, and deletions are highlighted
+  against the version in `HEAD`, with line numbers, deletion markers, and a
+  document overview showing where changes are located.
+- **Committed context at the caret** — a resizable pane follows the current
+  editing position and shows the corresponding committed lines, making small
+  changes easy to understand without switching to a separate diff view.
+- **Focused change navigation** — jump between changed blocks and continue
+  across changed files from the keyboard.
+- **Selective staging** — review a compact unified diff, include or exclude
+  individual added and deleted lines, and stage directly from the in-memory
+  editor buffer. A file does not need to be saved before it is staged.
+- **Built-in commits** — write a summary and optional description, then commit
+  the selected changes to the current branch from within DiffEdit.
+- **Multi-file buffers** — move between files without losing edits. DiffEdit
+  marks unsaved buffers and offers to save them together when a window closes.
+- **Safe external-change handling** — if another process changes or deletes an
+  open file, DiffEdit asks whether to keep the buffer, reload from disk, or
+  cancel before overwriting anything.
+- **Quick file access** — browse the repository tree, filter files with Quick
+  Open, reopen recent folders, and work in multiple folder windows.
+- **Native macOS experience** — an AppKit interface with standard menus,
+  keyboard shortcuts, adjustable type size, and optional word wrapping.
+
+## Typical workflow
+
+1. Open a folder within a Git repository.
+2. Select a file from the sidebar or press <kbd>⌘T</kbd> to use Quick Open.
+3. Edit while the committed-context pane and inline highlights track the
+   difference from `HEAD`.
+4. Switch from **Edit** to **Stage & Commit**.
+5. Choose the lines to include, stage them, and create the commit.
+
+DiffEdit also works when the opened folder is below the repository root. To
+avoid committing changes you cannot see, it blocks commits if the Git index
+contains staged files outside the opened folder.
+
+## Keyboard shortcuts
+
+| Action | Shortcut |
+| --- | --- |
+| Quick Open | <kbd>⌘T</kbd> |
+| Save current file | <kbd>⌘S</kbd> |
+| Previous / next change | <kbd>⇧⌘,</kbd> / <kbd>⇧⌘.</kbd> |
+| Previous / next paragraph | <kbd>⌥↑</kbd> / <kbd>⌥↓</kbd> |
+| Toggle word wrapping | <kbd>⌥⌘W</kbd> |
+| Increase / decrease type size | <kbd>⌘+</kbd> / <kbd>⌘−</kbd> |
+
+## Build and run
+
+### Xcode
+
+Requirements:
+
+- macOS 13 or newer
+- Xcode 15 or newer
 
 Open `DiffEdit.xcodeproj`, select the shared **DiffEdit** scheme, and press
-Command-R. The project contains:
+<kbd>⌘R</kbd>.
 
-- the macOS application target;
-- a `DiffEditTests` unit-test target;
-- generated Info.plist settings and a macOS 13 deployment target.
-
-The checked-in Xcode project is generated from `project.yml`. If the source
-layout changes and XcodeGen is installed, regenerate it with:
+The checked-in Xcode project is generated from `project.yml`. After changing
+the project structure, regenerate it with [XcodeGen](https://github.com/yonaskolb/XcodeGen):
 
 ```sh
 xcodegen generate
 ```
 
-## Source layout
+### Command line
 
-- `Application.swift`: application lifecycle, menus, windows, and feature coordination
-- `QuickOpen.swift`: quick-open panel and filtering
-- `Sidebar.swift`: repository outline and file cells
-- `EditorViewController.swift`: document editing workflow and diff presentation
-- `EditorBuffer.swift`: per-file in-memory text and navigation state
-- `EditorViews.swift`: reusable text, gutter, and change-overview views
-- `StagingDiffView.swift`: native unified-diff review and per-line staging controls
-- `EditorTheme.swift`: shared diff colors
-- `Repository.swift`: filesystem tree and Git access
-- `DiffEngine.swift`: diff result models and algorithms
-- `TextUtilities.swift`: shared line and range helpers
-
-## Command-line build
+Build a runnable app bundle with:
 
 ```sh
 ./Scripts/build_app.sh
 ```
 
-This creates `build/DiffEdit.app`. The script selects the full Xcode toolchain
-when it is installed, which avoids a compiler/SDK mismatch when
-`xcode-select` currently points at standalone Command Line Tools.
+The resulting app is written to `build/DiffEdit.app`.
 
-Run the unit tests with:
+Run the test suite with:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test
 ```
 
-## Editing and committing
+## Project structure
 
-DiffEdit keeps edits to multiple files buffered in memory when you move between
-files. A light-gray dot in the file list marks a buffer that has not been saved
-to disk. Closing a window with buffered edits offers to save all of them.
+DiffEdit has no third-party runtime dependencies. The app is written in Swift
+and AppKit, with the main code organized around:
 
-Use the **Edit** / **Stage & Commit** switch above the editor to enter source
-control mode. Changed lines are selected by default and can be included or
-excluded independently in the unified diff. Staging uses the in-memory buffer,
-so saving the file first is not required. The commit form accepts a required
-summary and an optional description.
+- `EditorViewController.swift` and `EditorViews.swift` — editing, committed
+  context, navigation, and diff presentation
+- `DiffEngine.swift` — line and word diffs plus selective-staging plans
+- `Repository.swift` — repository discovery, status, staging, and commits
+- `Sidebar.swift` and `QuickOpen.swift` — folder navigation and file access
+- `StagingDiffView.swift` — unified-diff review and per-line selection
 
-Before overwriting a file that changed outside DiffEdit, the app asks whether
-to keep the buffer, reload from disk, or cancel. Commits are blocked when the
-Git index contains staged files that are outside the opened folder or otherwise
-not represented in the file viewer. When a DiffEdit window becomes active, its
-open file is reread and rediffed only if that file's modification date changed;
-the caret returns to the same logical line and column after a reload. Git and
-disk refresh preparation runs in the background so activating or switching
-windows does not block the app.
+## License
 
-## Useful shortcuts
-
-- Command-T: quick-open a file
-- Command-Shift-Comma: previous changed block
-- Command-Shift-Period: next changed block
-- Option-Up / Option-Down: move between paragraphs
-- Option-Command-W: toggle word wrapping
+DiffEdit is available under the [MIT License](LICENSE).

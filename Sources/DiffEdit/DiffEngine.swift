@@ -417,7 +417,10 @@ enum DiffEngine {
     private static func wordDiff(old: String, new: String) -> (deleted: [NSRange], inserted: [NSRange], deletionMarkerColumns: [Int], currentToBaseColumn: [Int: Int]) {
         let oldTokens = tokenize(old)
         let newTokens = tokenize(new)
-        let operations = sequenceDiff(old: oldTokens.map(\.text), new: newTokens.map(\.text))
+        let operations = sequenceDiff(
+            old: contextualDiffKeys(for: oldTokens),
+            new: contextualDiffKeys(for: newTokens)
+        )
         var deleted: [NSRange] = []
         var inserted: [NSRange] = []
         var markerColumns: [Int] = []
@@ -466,12 +469,46 @@ enum DiffEngine {
         }
         flushInlineChangeBlock()
         let semanticMarkerColumns = semanticDeletionMarkerColumns(old: old, new: new)
+        let normalizedInsertedRanges = normalizedHighlightRanges(ranges: inserted, in: new)
+        let candidateMarkerColumns = semanticMarkerColumns.isEmpty
+            ? Array(Set(markerColumns)).sorted()
+            : semanticMarkerColumns
+        let pureDeletionMarkerColumns = candidateMarkerColumns.filter { markerColumn in
+            !normalizedInsertedRanges.contains { insertionRange in
+                markerTouchesInsertion(
+                    markerColumn,
+                    insertionRange: insertionRange,
+                    in: new
+                )
+            }
+        }
         return (
             normalizedHighlightRanges(ranges: deleted, in: old),
-            normalizedHighlightRanges(ranges: inserted, in: new),
-            semanticMarkerColumns.isEmpty ? Array(Set(markerColumns)).sorted() : semanticMarkerColumns,
+            normalizedInsertedRanges,
+            pureDeletionMarkerColumns,
             columnMap
         )
+    }
+
+    private static func markerTouchesInsertion(
+        _ markerColumn: Int,
+        insertionRange: NSRange,
+        in string: String
+    ) -> Bool {
+        let insertionEnd = NSMaxRange(insertionRange)
+        if markerColumn >= insertionRange.location, markerColumn <= insertionEnd {
+            return true
+        }
+        let gap: NSRange
+        if markerColumn < insertionRange.location {
+            gap = NSRange(location: markerColumn, length: insertionRange.location - markerColumn)
+        } else {
+            gap = NSRange(location: insertionEnd, length: markerColumn - insertionEnd)
+        }
+        let nsString = string as NSString
+        guard gap.location >= 0, NSMaxRange(gap) <= nsString.length else { return false }
+        let gapText = nsString.substring(with: gap)
+        return gapText.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted) == nil
     }
 
     private static func semanticDeletionMarkerColumns(old: String, new: String) -> [Int] {
@@ -572,6 +609,37 @@ enum DiffEngine {
             tokens.append((nsString.substring(with: range), range))
         }
         return tokens
+    }
+
+    private static func contextualDiffKeys(for tokens: [(text: String, range: NSRange)]) -> [String] {
+        var previousWords = Array(repeating: "", count: tokens.count)
+        var previousWord = ""
+        for index in tokens.indices {
+            previousWords[index] = previousWord
+            if let first = tokens[index].text.first, tokenCategory(String(first)) == .word {
+                previousWord = tokens[index].text
+            }
+        }
+        var nextWords = Array(repeating: "", count: tokens.count)
+        var nextWord = ""
+        for index in tokens.indices.reversed() {
+            nextWords[index] = nextWord
+            if let first = tokens[index].text.first, tokenCategory(String(first)) == .word {
+                nextWord = tokens[index].text
+            }
+        }
+        return tokens.indices.map { index in
+            let token = tokens[index].text
+            guard let first = token.first else { return "empty" }
+            switch tokenCategory(String(first)) {
+            case .word:
+                return "word\u{0}\(token)"
+            case .whitespace:
+                return "whitespace\u{0}\(token)"
+            case .punctuation:
+                return "punctuation\u{0}\(token)\u{0}\(previousWords[index])\u{0}\(nextWords[index])"
+            }
+        }
     }
 
     private enum TokenCategory {

@@ -19,18 +19,20 @@ enum WorkspaceMode: Int {
     case staging
 }
 
-final class EditorViewController: NSViewController, NSTextViewDelegate {
+final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitViewDelegate {
+    static let committedPaneHeightDefaultsKey = "DiffEdit.committedPaneHeight"
+
     var onBufferedChangesChanged: ((Set<String>) -> Void)?
     var onStageSelectionAvailabilityChanged: ((Bool) -> Void)?
     var resolveExternalFileConflict: ((ExternalFileConflict) -> ExternalFileResolution)?
 
     private let stack = NSStackView()
+    private let editorSplitView = EditorSplitView()
     private let committedRow = NSStackView()
     private let mainRow = NSStackView()
     private let committedScroll = NSScrollView()
     private let committedTextView = LineHighlightTextView()
     private var committedGutter: LineNumberGutterView?
-    private let divider = NSBox()
     private let mainScroll = NSScrollView()
     private let textView = LineHighlightTextView()
     private var mainGutter: LineNumberGutterView?
@@ -54,6 +56,8 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     private var foregroundEditorState: ForegroundEditorState?
     private let editorContentMargin: CGFloat = 24
     private var mode = WorkspaceMode.editing
+    private var hasRestoredDivider = false
+    private var isRestoringDivider = false
 
     override func loadView() {
         view = NSView()
@@ -63,14 +67,21 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         stack.spacing = 0
         view.addSubview(stack)
 
+        editorSplitView.translatesAutoresizingMaskIntoConstraints = false
+        editorSplitView.isVertical = false
+        editorSplitView.dividerStyle = .thin
+        editorSplitView.delegate = self
+        editorSplitView.setContentHuggingPriority(.defaultLow, for: .vertical)
+        editorSplitView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+
         committedRow.orientation = .horizontal
         committedRow.spacing = 0
-        committedRow.translatesAutoresizingMaskIntoConstraints = false
+        committedRow.translatesAutoresizingMaskIntoConstraints = true
         committedRow.wantsLayer = true
         committedRow.layer?.masksToBounds = true
         mainRow.orientation = .horizontal
         mainRow.spacing = 0
-        mainRow.translatesAutoresizingMaskIntoConstraints = false
+        mainRow.translatesAutoresizingMaskIntoConstraints = true
         mainRow.wantsLayer = true
         mainRow.layer?.masksToBounds = true
 
@@ -142,32 +153,32 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         statusLabel.alignment = .left
         statusLabel.lineBreakMode = .byTruncatingMiddle
         statusLabel.setContentHuggingPriority(.required, for: .vertical)
-        divider.boxType = .separator
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        divider.contentView?.wantsLayer = true
-        divider.contentView?.layer?.backgroundColor = DiffPalette.divider.cgColor
-
         stagingDiffView.isHidden = true
         stagingDiffView.onSetChangeSelection = { [weak self] id, selected in
             self?.setStageSelection(for: id, selected: selected)
         }
 
-        stack.addArrangedSubview(committedRow)
-        stack.addArrangedSubview(divider)
-        stack.addArrangedSubview(mainRow)
+        editorSplitView.addSubview(committedRow)
+        editorSplitView.addSubview(mainRow)
+        editorSplitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
+        stack.addArrangedSubview(editorSplitView)
         stack.addArrangedSubview(statusLabel)
         stack.addArrangedSubview(stagingDiffView)
+        let committedGutterWidth = committedGutter.widthAnchor.constraint(equalToConstant: 46)
+        let mainGutterWidth = mainGutter.widthAnchor.constraint(equalToConstant: 46)
+        let overviewWidth = changeOverview.widthAnchor.constraint(equalToConstant: 14)
+        for constraint in [committedGutterWidth, mainGutterWidth, overviewWidth] {
+            constraint.priority = NSLayoutConstraint.Priority(999)
+        }
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             stack.topAnchor.constraint(equalTo: view.topAnchor),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             stagingDiffView.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            committedRow.heightAnchor.constraint(equalToConstant: 106),
-            committedGutter.widthAnchor.constraint(equalToConstant: 46),
-            mainGutter.widthAnchor.constraint(equalToConstant: 46),
-            changeOverview.widthAnchor.constraint(equalToConstant: 14),
-            divider.heightAnchor.constraint(equalToConstant: 2),
+            committedGutterWidth,
+            mainGutterWidth,
+            overviewWidth,
             statusLabel.heightAnchor.constraint(equalToConstant: 24)
         ])
         NotificationCenter.default.addObserver(self, selector: #selector(scrollViewDidScroll(_:)), name: NSView.boundsDidChangeNotification, object: mainScroll.contentView)
@@ -178,8 +189,53 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     override func viewDidLayout() {
         super.viewDidLayout()
         applyWrapping()
+        restoreDividerIfNeeded()
         mainScroll.contentView.scroll(to: NSPoint(x: 0, y: mainScroll.contentView.bounds.origin.y))
         mainScroll.reflectScrolledClipView(mainScroll.contentView)
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainMinCoordinate proposedMinimumPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        guard splitView === editorSplitView, dividerIndex == 0 else { return proposedMinimumPosition }
+        return max(proposedMinimumPosition, committedPaneMinimumHeight)
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainMaxCoordinate proposedMaximumPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        guard splitView === editorSplitView, dividerIndex == 0 else { return proposedMaximumPosition }
+        let maximum = splitView.bounds.height - splitView.dividerThickness - editablePaneMinimumHeight
+        return min(proposedMaximumPosition, maximum)
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainSplitPosition proposedPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        guard splitView === editorSplitView, dividerIndex == 0 else { return proposedPosition }
+        let contentInset = committedTextView.textContainerInset.height * 2
+        let lineHeight = editorLineHeight(for: committedTextView)
+        let lineCount = max(2, ((proposedPosition - contentInset) / lineHeight).rounded())
+        let snappedPosition = contentInset + lineCount * lineHeight
+        let maximum = splitView.bounds.height - splitView.dividerThickness - editablePaneMinimumHeight
+        return min(maximum, max(committedPaneMinimumHeight, snappedPosition))
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard notification.object as? NSSplitView === editorSplitView else { return }
+        if hasRestoredDivider, !isRestoringDivider, mode == .editing, committedRow.frame.height > 0 {
+            UserDefaults.standard.set(Double(committedRow.frame.height), forKey: Self.committedPaneHeightDefaultsKey)
+        }
+        if currentFileURL != nil {
+            committedRow.layoutSubtreeIfNeeded()
+            updateCommittedContext()
+        }
     }
 
     func showPlaceholder(_ message: String) {
@@ -199,7 +255,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         committedTextView.caretMarker = nil
         committedVisibleBaseLines = []
         statusLabel.stringValue = message
-        stagingDiffView.setDocument(filePath: nil, rows: [], selectedChanges: [])
+        stagingDiffView.setDocument(rows: [], selectedChanges: [])
         reportBufferedChanges()
         onStageSelectionAvailabilityChanged?(false)
     }
@@ -756,6 +812,44 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         }
     }
 
+    private var committedPaneMinimumHeight: CGFloat {
+        paneMinimumHeight(for: committedTextView, visibleLines: 2)
+    }
+
+    private var committedPaneDefaultHeight: CGFloat {
+        paneMinimumHeight(for: committedTextView, visibleLines: 5)
+    }
+
+    private var editablePaneMinimumHeight: CGFloat {
+        paneMinimumHeight(for: textView, visibleLines: 5)
+    }
+
+    private func paneMinimumHeight(for textView: NSTextView, visibleLines: Int) -> CGFloat {
+        let lineHeight = editorLineHeight(for: textView)
+        return ceil(textView.textContainerInset.height * 2 + lineHeight * CGFloat(visibleLines))
+    }
+
+    private func editorLineHeight(for textView: NSTextView) -> CGFloat {
+        let font = textView.font ?? editorFont()
+        return (textView.layoutManager?.defaultLineHeight(for: font) ?? font.boundingRectForFont.height) + 2
+    }
+
+    private func restoreDividerIfNeeded() {
+        guard !hasRestoredDivider else { return }
+        let availableHeight = editorSplitView.bounds.height
+        let requiredHeight = committedPaneMinimumHeight + editorSplitView.dividerThickness + editablePaneMinimumHeight
+        guard availableHeight >= requiredHeight else { return }
+        hasRestoredDivider = true
+        let savedHeight = (UserDefaults.standard.object(forKey: Self.committedPaneHeightDefaultsKey) as? NSNumber)
+            .map { CGFloat(truncating: $0) }
+        let desiredHeight = savedHeight ?? committedPaneDefaultHeight
+        let maximumHeight = availableHeight - editorSplitView.dividerThickness - editablePaneMinimumHeight
+        let committedHeight = min(maximumHeight, max(committedPaneMinimumHeight, desiredHeight))
+        isRestoringDivider = true
+        editorSplitView.setPosition(committedHeight, ofDividerAt: 0)
+        isRestoringDivider = false
+    }
+
     private func recomputeHighlights() {
         let workingText = textView.string
         lastDiff = DiffEngine.diff(base: baseText, current: workingText)
@@ -795,9 +889,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
     func setMode(_ mode: WorkspaceMode) {
         self.mode = mode
         let editing = mode == .editing
-        committedRow.isHidden = !editing
-        divider.isHidden = !editing
-        mainRow.isHidden = !editing
+        editorSplitView.isHidden = !editing
         statusLabel.isHidden = !editing
         stagingDiffView.isHidden = editing
         if !editing {
@@ -813,7 +905,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
               let currentRelativePath,
               let buffer = buffersByPath[currentRelativePath] else {
             if !stagingDiffView.isHidden {
-                stagingDiffView.setDocument(filePath: nil, rows: [], selectedChanges: [])
+                stagingDiffView.setDocument(rows: [], selectedChanges: [])
             }
             return
         }
@@ -821,7 +913,6 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         let plan = DiffEngine.selectiveStagingPlan(base: buffer.baseText, current: currentText)
         let state = updateStageSelection(relativePath: currentRelativePath, selectableChanges: plan.selectableChanges)
         stagingDiffView.setDocument(
-            filePath: currentRelativePath,
             rows: plan.diffRows,
             selectedChanges: state.selected
         )
@@ -905,7 +996,8 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         let baseLines = baseText.splitKeepingEmptyLines()
         var context = ""
         var contextBaseLines: [Int?] = []
-        let visibleBaseLines = (mappedBaseLine - 2)...(mappedBaseLine + 2)
+        let contextRadius = committedContextRadius()
+        let visibleBaseLines = (mappedBaseLine - contextRadius)...(mappedBaseLine + contextRadius)
         for (offset, index) in visibleBaseLines.enumerated() {
             if index >= 0 && index < baseLines.count {
                 contextBaseLines.append(index)
@@ -913,7 +1005,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
             } else {
                 contextBaseLines.append(nil)
             }
-            if offset < 4 {
+            if offset < visibleBaseLines.count - 1 {
                 context += "\n"
             }
         }
@@ -947,10 +1039,15 @@ final class EditorViewController: NSViewController, NSTextViewDelegate {
         committedTextView.textStorage?.setAttributedString(attributed)
         committedGutter?.needsDisplay = true
         if let visibleLine = contextBaseLines.firstIndex(where: { $0 == mappedBaseLine }) {
-            DispatchQueue.main.async { [weak self] in
-                self?.centerCommittedVisibleLine(visibleLine)
-            }
+            centerCommittedVisibleLine(visibleLine)
         }
+    }
+
+    private func committedContextRadius() -> Int {
+        let availableHeight = max(committedPaneMinimumHeight, committedScroll.contentSize.height)
+            - committedTextView.textContainerInset.height * 2
+        let visibleLineCount = max(2, Int(ceil(availableHeight / editorLineHeight(for: committedTextView))))
+        return max(2, Int(ceil(CGFloat(visibleLineCount) / 2)) + 2)
     }
 
     private func contextMenu(at characterIndex: Int) -> NSMenu? {
