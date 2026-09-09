@@ -51,19 +51,25 @@ final class Repository {
     }
 
     func refreshStatus() {
-        apply(statusSnapshot())
+        unstagedPaths = changedPaths()
     }
 
     func statusSnapshot() -> RepositoryStatusSnapshot {
-        let modified = runGit(arguments: ["diff", "--name-only"]).output.splitLines()
-        let staged = runGit(arguments: ["diff", "--cached", "--name-only"]).output.splitLines()
-        let untracked = runGit(arguments: ["ls-files", "--others", "--exclude-standard"]).output.splitLines()
-        let paths = Set((modified + staged + untracked).compactMap(uiRelativePath(gitRelativePath:)))
+        let started = PerformanceTiming.start()
+        defer { PerformanceTiming.finish("status snapshot", since: started) }
+        let paths = changedPaths()
         return RepositoryStatusSnapshot(
             unstagedPaths: paths,
             branchName: currentBranchName,
             tree: makeTree(unstagedPaths: paths)
         )
+    }
+
+    private func changedPaths() -> Set<String> {
+        let modified = runGit(arguments: ["diff", "--name-only"]).output.splitLines()
+        let staged = runGit(arguments: ["diff", "--cached", "--name-only"]).output.splitLines()
+        let untracked = runGit(arguments: ["ls-files", "--others", "--exclude-standard"]).output.splitLines()
+        return Set((modified + staged + untracked).compactMap(uiRelativePath(gitRelativePath:)))
     }
 
     func apply(_ snapshot: RepositoryStatusSnapshot) {
@@ -153,12 +159,14 @@ final class Repository {
     }
 
     private func makeTree(unstagedPaths: Set<String>) -> FileNode {
+        let started = PerformanceTiming.start()
+        defer { PerformanceTiming.finish("file tree", since: started) }
         let fileManager = FileManager.default
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isHiddenKey]
         let enumerator = fileManager.enumerator(
             at: rootURL,
             includingPropertiesForKeys: Array(keys),
-            options: [.skipsPackageDescendants]
+            options: [.skipsPackageDescendants, .skipsHiddenFiles]
         )
         let root = MutableNode(name: rootURL.lastPathComponent, relativePath: "", url: rootURL, isDirectory: true)
         while let url = enumerator?.nextObject() as? URL {
@@ -185,12 +193,14 @@ final class Repository {
     }
 
     func allFiles() -> [FileReference] {
+        let started = PerformanceTiming.start()
+        defer { PerformanceTiming.finish("quick open enumeration", since: started) }
         let fileManager = FileManager.default
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isHiddenKey]
         let enumerator = fileManager.enumerator(
             at: rootURL,
             includingPropertiesForKeys: Array(keys),
-            options: [.skipsPackageDescendants]
+            options: [.skipsPackageDescendants, .skipsHiddenFiles]
         )
         var files: [FileReference] = []
         while let url = enumerator?.nextObject() as? URL {
@@ -259,6 +269,8 @@ final class Repository {
     }
 
     private static func runGit(in directory: URL, arguments: [String], input: Data? = nil, allowFailure: Bool = false) -> (status: Int32, output: String) {
+        let started = PerformanceTiming.start()
+        defer { PerformanceTiming.finish("git \(arguments.first ?? "")", since: started) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["git", "-C", directory.path] + arguments
@@ -409,5 +421,20 @@ final class FileNode: NSObject {
         for child in children {
             child.collectChangedFiles(additionalPaths: additionalPaths, into: &files)
         }
+    }
+}
+
+// Enable with DIFFEDIT_TIMINGS=1. Labels omit file paths and command payloads.
+enum PerformanceTiming {
+    private static let enabled = ProcessInfo.processInfo.environment["DIFFEDIT_TIMINGS"] == "1"
+
+    static func start() -> TimeInterval? {
+        enabled ? ProcessInfo.processInfo.systemUptime : nil
+    }
+
+    static func finish(_ label: String, since start: TimeInterval?) {
+        guard let start else { return }
+        let milliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1_000
+        NSLog("[DiffEdit timing] %@: %.1f ms", label, milliseconds)
     }
 }

@@ -9,6 +9,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private let modeControl = NSSegmentedControl(labels: ["Edit", "Stage & Commit"], trackingMode: .selectOne, target: nil, action: nil)
     private let scrollView = NSScrollView()
     private let outlineView = NSOutlineView()
+    private let loadingIndicator = NSProgressIndicator()
+    private let fileCellIdentifier = NSUserInterfaceItemIdentifier("FileCell")
+    private var reloadGeneration = 0
+    private var isLoading = false
     private let sidebarHeader = NSTextField(labelWithString: "Files")
     private let sourceControlPanel = NSView()
     private let commitMessageField = NSTextField()
@@ -53,6 +57,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         scrollView.documentView = outlineView
         view.addSubview(modeControl)
         view.addSubview(sidebarHeader)
+        loadingIndicator.translatesAutoresizingMaskIntoConstraints = false
+        loadingIndicator.style = .spinning
+        loadingIndicator.controlSize = .small
+        loadingIndicator.isDisplayedWhenStopped = false
+        loadingIndicator.setAccessibilityLabel("Loading folder")
+        view.addSubview(loadingIndicator)
         view.addSubview(scrollView)
         sourceControlPanel.translatesAutoresizingMaskIntoConstraints = false
         commitMessageField.translatesAutoresizingMaskIntoConstraints = false
@@ -98,9 +108,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             modeControl.topAnchor.constraint(equalTo: view.topAnchor, constant: 7),
             modeControl.heightAnchor.constraint(equalToConstant: 25),
             sidebarHeader.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-            sidebarHeader.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            sidebarHeader.trailingAnchor.constraint(equalTo: loadingIndicator.leadingAnchor, constant: -6),
             sidebarHeader.topAnchor.constraint(equalTo: modeControl.bottomAnchor, constant: 5),
             sidebarHeader.heightAnchor.constraint(equalToConstant: 22),
+            loadingIndicator.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            loadingIndicator.centerYAnchor.constraint(equalTo: sidebarHeader.centerYAnchor),
+            loadingIndicator.widthAnchor.constraint(equalToConstant: 16),
+            loadingIndicator.heightAnchor.constraint(equalToConstant: 16),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: sidebarHeader.bottomAnchor, constant: 2),
@@ -129,9 +143,23 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         ])
     }
 
+    func setLoading(_ loading: Bool) {
+        isLoading = loading
+        modeControl.isEnabled = !loading
+        outlineView.isEnabled = !loading
+        commitButton.isEnabled = !loading
+        stageButton.isEnabled = !loading && stagingMode && stageSelectionAvailable
+        sidebarHeader.stringValue = loading ? "Loading files…" : (stagingMode ? "Changes  \(outlineRoot.changedFileCount)" : "Files")
+        if loading {
+            loadingIndicator.startAnimation(nil)
+        } else {
+            loadingIndicator.stopAnimation(nil)
+        }
+    }
+
     func setStageEnabled(_ enabled: Bool) {
         stageSelectionAvailable = enabled
-        stageButton.isEnabled = stagingMode && enabled
+        stageButton.isEnabled = !isLoading && stagingMode && enabled
     }
 
     func setSourceControlStatus(_ message: String) {
@@ -153,7 +181,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         stagingMode = mode == .staging
         sourceControlPanel.isHidden = !stagingMode
         sourceControlPanelHeight?.constant = stagingMode ? 210 : 0
-        stageButton.isEnabled = stagingMode && stageSelectionAvailable
+        stageButton.isEnabled = !isLoading && stagingMode && stageSelectionAvailable
         load(root: root, preservingSelection: selectedRelativePath)
     }
 
@@ -164,6 +192,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     func load(root: FileNode, preservingSelection selection: String? = nil, resetState: Bool = false) {
+        reloadGeneration += 1
+        let generation = reloadGeneration
         let expandedPaths = resetState ? [] : currentExpandedPaths()
         let scrollOrigin = resetState ? .zero : scrollView.contentView.bounds.origin
         selectedRelativePath = resetState ? selection : (selection ?? selectedRelativePath)
@@ -190,19 +220,25 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             }
         }
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.reloadGeneration == generation else { return }
             self.scrollView.contentView.scroll(to: scrollOrigin)
             self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
         }
         isReloading = false
         if stagingMode, let selectedNode {
             DispatchQueue.main.async { [weak self] in
-                self?.onSelection?(selectedNode)
+                guard let self,
+                      self.reloadGeneration == generation,
+                      self.stagingMode,
+                      !self.isLoading,
+                      self.selectedRelativePath == selectedNode.relativePath else { return }
+                self.onSelection?(selectedNode)
             }
         }
     }
 
     func setBufferedChangePaths(_ paths: Set<String>) {
+        guard bufferedChangePaths != paths else { return }
         bufferedChangePaths = paths
         guard isViewLoaded else { return }
         if stagingMode {
@@ -248,7 +284,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let node = item as? FileNode else { return nil }
-        let cell = FileCellView()
+        let cell = outlineView.makeView(withIdentifier: fileCellIdentifier, owner: self) as? FileCellView
+            ?? FileCellView()
+        cell.identifier = fileCellIdentifier
         cell.configure(
             node: node,
             showsRepositoryDot: showsDot(for: node),
@@ -396,6 +434,7 @@ final class FileCellView: NSTableCellView {
 
     func configure(node: FileNode, showsRepositoryDot: Bool, showsBufferedChange: Bool) {
         label.stringValue = node.name
+        toolTip = node.relativePath
         repositoryDot.layer?.backgroundColor = showsRepositoryDot ? NSColor.systemOrange.cgColor : NSColor.clear.cgColor
         setShowsBufferedChange(showsBufferedChange)
     }

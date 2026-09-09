@@ -313,6 +313,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
     private var repository: Repository?
     private var quickOpenController: QuickOpenController?
     private var activationRefreshGeneration = 0
+    private var folderLoadGeneration = 0
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -490,13 +491,30 @@ final class MainViewController: NSSplitViewController, AppCommands {
 
     func loadFolder(_ url: URL) {
         invalidateActivationRefresh()
-        let repo = Repository(rootURL: url)
-        repository = repo
-        repo.refreshStatus()
-        sidebar.setCurrentBranchName(repo.currentBranchName)
-        sidebar.load(root: repo.makeTree(), resetState: true)
-        editor.showPlaceholder("Select a file from \(url.lastPathComponent).")
+        folderLoadGeneration += 1
+        let generation = folderLoadGeneration
+        repository = nil
+        sidebar.setLoading(true)
+        editor.showPlaceholder("Loading \(url.lastPathComponent)…")
         view.window?.title = "DiffEdit - \(url.path)"
+        let started = PerformanceTiming.start()
+        activationRefreshQueue.async { [weak self] in
+            let repo = Repository(rootURL: url)
+            let snapshot = repo.statusSnapshot()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.folderLoadGeneration == generation else { return }
+                self.invalidateActivationRefresh()
+                self.repository = repo
+                repo.apply(snapshot)
+                self.sidebar.setCurrentBranchName(snapshot.branchName)
+                let sidebarStarted = PerformanceTiming.start()
+                self.sidebar.load(root: snapshot.tree, resetState: true)
+                self.sidebar.setLoading(false)
+                PerformanceTiming.finish("initial sidebar load", since: sidebarStarted)
+                self.editor.showPlaceholder("Select a file from \(url.lastPathComponent).")
+                PerformanceTiming.finish("folder open", since: started)
+            }
+        }
     }
 
     private func open(node: FileNode) {

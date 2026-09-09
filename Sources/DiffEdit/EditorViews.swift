@@ -2,6 +2,13 @@ import AppKit
 import Foundation
 
 final class EditorSplitView: NSSplitView {
+    var onDividerDragCompleted: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        onDividerDragCompleted?()
+    }
+
     override var dividerThickness: CGFloat { 5 }
 
     override func drawDivider(in rect: NSRect) {

@@ -110,3 +110,11 @@ and AppKit, with the main code organized around:
 ## License
 
 DiffEdit is available under the [MIT License](LICENSE).
+
+## Performance diagnostics
+
+Set `DIFFEDIT_TIMINGS=1` in the Xcode scheme’s environment variables, or launch
+`DIFFEDIT_TIMINGS=1 build/DiffEdit.app/Contents/MacOS/DiffEdit` from a terminal.
+The console reports milliseconds for each Git command, file-tree construction,
+initial sidebar rendering, total folder opening, and Quick Open enumeration.
+Timings are disabled by default; folder opening includes background queue time.

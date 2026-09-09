@@ -38,6 +38,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     private var mainGutter: LineNumberGutterView?
     private let changeOverview = ChangeOverviewView()
     private let stagingDiffView = StagingDiffView()
+    private let statusBar = NSView()
     private let statusLabel = NSTextField(labelWithString: "Open a folder to begin.")
     private var currentFileURL: URL?
     private var currentRelativePath: String?
@@ -57,7 +58,6 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     private let editorContentMargin: CGFloat = 24
     private var mode = WorkspaceMode.editing
     private var hasRestoredDivider = false
-    private var isRestoringDivider = false
 
     override func loadView() {
         view = NSView()
@@ -71,6 +71,10 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         editorSplitView.isVertical = false
         editorSplitView.dividerStyle = .thin
         editorSplitView.delegate = self
+        editorSplitView.onDividerDragCompleted = { [weak self] in
+            guard let self, self.hasRestoredDivider, self.mode == .editing else { return }
+            UserDefaults.standard.set(Double(self.committedRow.frame.height), forKey: Self.committedPaneHeightDefaultsKey)
+        }
         editorSplitView.setContentHuggingPriority(.defaultLow, for: .vertical)
         editorSplitView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
@@ -145,7 +149,12 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         changeOverview.scrollView = mainScroll
         mainRow.addArrangedSubview(changeOverview)
 
+        statusBar.translatesAutoresizingMaskIntoConstraints = false
+        statusBar.wantsLayer = true
+        statusBar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        statusBar.addSubview(statusLabel)
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.identifier = NSUserInterfaceItemIdentifier("editorStatus")
         statusLabel.controlSize = .small
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.backgroundColor = .windowBackgroundColor
@@ -162,7 +171,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         editorSplitView.addSubview(mainRow)
         editorSplitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
         stack.addArrangedSubview(editorSplitView)
-        stack.addArrangedSubview(statusLabel)
+        stack.addArrangedSubview(statusBar)
         stack.addArrangedSubview(stagingDiffView)
         let committedGutterWidth = committedGutter.widthAnchor.constraint(equalToConstant: 46)
         let mainGutterWidth = mainGutter.widthAnchor.constraint(equalToConstant: 46)
@@ -179,7 +188,11 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
             committedGutterWidth,
             mainGutterWidth,
             overviewWidth,
-            statusLabel.heightAnchor.constraint(equalToConstant: 24)
+            statusBar.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            statusBar.heightAnchor.constraint(equalToConstant: 24),
+            statusLabel.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor, constant: 10),
+            statusLabel.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor, constant: -10),
+            statusLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor)
         ])
         NotificationCenter.default.addObserver(self, selector: #selector(scrollViewDidScroll(_:)), name: NSView.boundsDidChangeNotification, object: mainScroll.contentView)
         NotificationCenter.default.addObserver(self, selector: #selector(scrollViewDidScroll(_:)), name: NSView.boundsDidChangeNotification, object: committedScroll.contentView)
@@ -227,11 +240,12 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         return min(maximum, max(committedPaneMinimumHeight, snappedPosition))
     }
 
+    func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview subview: NSView) -> Bool {
+        splitView !== editorSplitView || subview !== committedRow
+    }
+
     func splitViewDidResizeSubviews(_ notification: Notification) {
         guard notification.object as? NSSplitView === editorSplitView else { return }
-        if hasRestoredDivider, !isRestoringDivider, mode == .editing, committedRow.frame.height > 0 {
-            UserDefaults.standard.set(Double(committedRow.frame.height), forKey: Self.committedPaneHeightDefaultsKey)
-        }
         if currentFileURL != nil {
             committedRow.layoutSubtreeIfNeeded()
             updateCommittedContext()
@@ -347,7 +361,8 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         mainScroll.reflectScrolledClipView(mainScroll.contentView)
         textView.undoManager?.removeAllActions()
         updateActiveLineHighlight()
-        statusLabel.stringValue = buffer.relativePath
+        statusLabel.stringValue = ""
+        view.window?.title = "DiffEdit — \(buffer.relativePath)"
         recomputeHighlights()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -845,9 +860,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         let desiredHeight = savedHeight ?? committedPaneDefaultHeight
         let maximumHeight = availableHeight - editorSplitView.dividerThickness - editablePaneMinimumHeight
         let committedHeight = min(maximumHeight, max(committedPaneMinimumHeight, desiredHeight))
-        isRestoringDivider = true
         editorSplitView.setPosition(committedHeight, ofDividerAt: 0)
-        isRestoringDivider = false
     }
 
     private func recomputeHighlights() {
@@ -890,7 +903,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         self.mode = mode
         let editing = mode == .editing
         editorSplitView.isHidden = !editing
-        statusLabel.isHidden = !editing
+        statusBar.isHidden = !editing
         stagingDiffView.isHidden = editing
         if !editing {
             persistCurrentBuffer()

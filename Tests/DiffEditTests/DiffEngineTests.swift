@@ -365,6 +365,26 @@ final class FileNodeFilteringTests: XCTestCase {
 }
 
 final class RepositoryStagingTests: XCTestCase {
+    func testFolderScanPrunesHiddenDescendantsAndPreservesVisibleChanges() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiffEditScanTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try runGit(["init", "-q"], in: directory)
+        for path in [".build/cache/leaked.txt", "visible/file.txt"] {
+            let url = directory.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try "content".write(to: url, atomically: true, encoding: .utf8)
+        }
+        let repository = Repository(rootURL: directory)
+        let snapshot = repository.statusSnapshot()
+        XCTAssertEqual(snapshot.tree.filesInDisplayOrder.map(\.relativePath), ["visible/file.txt"])
+        XCTAssertTrue(try XCTUnwrap(snapshot.tree.find(relativePath: "visible/file.txt")).hasUnstagedChange)
+        XCTAssertEqual(repository.allFiles().map(\.relativePath), ["visible/file.txt"])
+        repository.refreshStatus()
+        XCTAssertEqual(repository.unstagedPaths, snapshot.unstagedPaths)
+    }
+
     func testStagesInMemoryContentAndCommitsIt() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("DiffEditRepositoryTests-\(UUID().uuidString)")
@@ -866,6 +886,7 @@ final class WorkspaceModeUITests: XCTestCase {
         let persistedHeight: CGFloat = 180
         splitView.setPosition(persistedHeight, ofDividerAt: 0)
         let snappedPersistedHeight = committedRow.frame.height
+        splitView.onDividerDragCompleted?()
         XCTAssertEqual(defaults.double(forKey: defaultsKey), snappedPersistedHeight, accuracy: 1)
         let snappedContentHeight = snappedPersistedHeight - committedTextView.textContainerInset.height * 2
         XCTAssertEqual(
@@ -873,6 +894,11 @@ final class WorkspaceModeUITests: XCTestCase {
             (snappedContentHeight / committedLineHeight).rounded(),
             accuracy: 0.01
         )
+
+        editor.view.frame.size.height += 250
+        editor.view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(committedRow.frame.height, snappedPersistedHeight, accuracy: 1)
+        XCTAssertEqual(defaults.double(forKey: defaultsKey), snappedPersistedHeight, accuracy: 1)
 
         let restoredEditor = EditorViewController()
         restoredEditor.loadView()
@@ -1148,8 +1174,9 @@ final class WorkspaceModeUITests: XCTestCase {
         )
         XCTAssertLessThan(trailingRect.minY, editableTextView.textContainerOrigin.y + layoutManager.usedRect(for: try XCTUnwrap(editableTextView.textContainer)).maxY)
 
-        let statusLabel = try XCTUnwrap(descendants(of: editor.view, matching: NSTextField.self).first { $0.stringValue == "example.txt" })
+        let statusLabel = try XCTUnwrap(descendants(of: editor.view, matching: NSTextField.self).first { $0.identifier?.rawValue == "editorStatus" })
         XCTAssertEqual(statusLabel.alignment, .left)
+        XCTAssertEqual(statusLabel.stringValue, "")
     }
 
     private func descendants<T: NSView>(of view: NSView, matching type: T.Type) -> [T] {
