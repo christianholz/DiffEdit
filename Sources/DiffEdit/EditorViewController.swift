@@ -1422,7 +1422,10 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         } else {
             committedTextView.caretMarker = nil
         }
-        guard needsRebuild else { return }
+        guard needsRebuild else {
+            centerCommittedCaret()
+            return
+        }
         committedContextNeedsRefresh = false
         let attributed = NSMutableAttributedString(
             string: context,
@@ -1443,9 +1446,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         }
         committedTextView.textStorage?.setAttributedString(attributed)
         committedGutter?.needsDisplay = true
-        if let visibleLine = contextBaseLines.firstIndex(where: { $0 == mappedBaseLine }) {
-            centerCommittedVisibleLine(visibleLine)
-        }
+        centerCommittedCaret()
     }
 
     private func committedContextRadius() -> Int {
@@ -1520,16 +1521,19 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         return max(0, best.baseColumn + (currentColumn - best.currentColumn))
     }
 
-    private func centerCommittedVisibleLine(_ line: Int) {
-        guard let layoutManager = committedTextView.layoutManager,
+    private func centerCommittedCaret() {
+        guard let marker = committedTextView.caretMarker,
+              let layoutManager = committedTextView.layoutManager,
               let textContainer = committedTextView.textContainer else { return }
         layoutManager.ensureLayout(for: textContainer)
         let nsString = committedTextView.string as NSString
-        let range = nsString.lineRange(forLineIndex: line)
+        let range = nsString.lineRange(forLineIndex: marker.line)
         guard range.location != NSNotFound else { return }
         let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
         guard glyphRange.length > 0 else { return }
-        var rect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyphRange.location, length: 1), in: textContainer)
+        let character = min(NSMaxRange(range) - 1, range.location + max(0, marker.column))
+        let glyph = layoutManager.glyphIndexForCharacter(at: character)
+        var rect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer)
         rect.origin.y += committedTextView.textContainerOrigin.y
         let viewport = committedScroll.contentView.bounds
         let targetY = max(0, rect.midY - viewport.height / 2)

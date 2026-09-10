@@ -789,6 +789,44 @@ final class TextSelectionSnapshotTests: XCTestCase {
 }
 
 final class WorkspaceModeUITests: XCTestCase {
+    func testPastPaneFollowsCaretWithinAWrappedParagraph() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runGitForUITest(["init", "-q"], in: directory)
+        try runGitForUITest(["config", "user.name", "DiffEdit Tests"], in: directory)
+        try runGitForUITest(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        let file = directory.appendingPathComponent("wrapped.txt")
+        let paragraph = String(repeating: "A long paragraph with several words to wrap. ", count: 100)
+        try (paragraph + "\n").write(to: file, atomically: true, encoding: .utf8)
+        try runGitForUITest(["add", "."], in: directory)
+        try runGitForUITest(["commit", "-qm", "initial"], in: directory)
+        let editor = EditorViewController()
+        let window = NSWindow(contentViewController: editor)
+        defer { window.orderOut(nil) }
+        window.setContentSize(NSSize(width: 600, height: 700))
+        XCTAssertTrue(try editor.open(file: file, relativePath: "wrapped.txt", repository: Repository(rootURL: directory), onSaved: {}))
+        editor.view.layoutSubtreeIfNeeded()
+        let texts = descendants(of: editor.view, matching: LineHighlightTextView.self)
+        let current = try XCTUnwrap(texts.first(where: \.isEditable))
+        let past = try XCTUnwrap(texts.first(where: { !$0.isEditable }))
+        let viewport = try XCTUnwrap(past.enclosingScrollView?.contentView)
+        let initialY = viewport.bounds.minY
+        current.setSelectedRange(NSRange(location: (paragraph as NSString).length / 2, length: 0))
+        editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+        XCTAssertGreaterThan(viewport.bounds.minY, initialY + 100)
+        let marker = try XCTUnwrap(past.caretMarker)
+        let location = (past.string as NSString).lineStartOffset(forLineIndex: marker.line) + marker.column
+        let layout = try XCTUnwrap(past.layoutManager)
+        let container = try XCTUnwrap(past.textContainer)
+        let glyph = layout.glyphIndexForCharacter(at: location)
+        let rect = layout.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+        XCTAssertEqual(rect.midY + past.textContainerOrigin.y, viewport.bounds.midY, accuracy: 1)
+        current.setSelectedRange(NSRange(location: 0, length: 0))
+        editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+        XCTAssertEqual(viewport.bounds.minY, initialY, accuracy: 1)
+    }
+
     func testTypingMovesDeletionAnchorsImmediatelyAndEnterKeepsLineShading() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
