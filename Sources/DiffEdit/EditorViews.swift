@@ -66,6 +66,7 @@ final class LineHighlightTextView: NSTextView {
     var contextMenuProvider: ((Int) -> NSMenu?)?
     var clipboardWriter: ((String) -> Void)?
     var showsCaretMarker = true
+    var insertionCaretMarker: CaretMarker? { didSet { needsDisplay = true } }
     var caretMarker: CaretMarker? {
         didSet {
             needsDisplay = true
@@ -99,6 +100,7 @@ final class LineHighlightTextView: NSTextView {
         super.draw(dirtyRect)
         drawDeletionMarkers(in: dirtyRect)
         drawCaretMarker(in: dirtyRect)
+        drawInsertionCaretMarker(in: dirtyRect)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -347,6 +349,21 @@ final class LineHighlightTextView: NSTextView {
         return textOrigin.y + (marker.kind == .lineBoundaryBefore ? fragment.minY : fragment.maxY)
     }
 
+    private func drawInsertionCaretMarker(in dirtyRect: NSRect) {
+        guard let marker = insertionCaretMarker, let layoutManager, let textContainer else { return }
+        let text = string as NSString
+        let line = text.lineRange(forLineIndex: marker.line)
+        guard line.location != NSNotFound else { return }
+        let location = min(text.length, line.location + max(0, marker.column))
+        guard var rect = markerRect(characterLocation: location, textOrigin: textContainerOrigin,
+                                    layoutManager: layoutManager, textContainer: textContainer) else { return }
+        rect.origin.x -= 1
+        rect.size.width = 2
+        guard rect.intersects(dirtyRect) else { return }
+        DiffPalette.insertionMarker.setFill()
+        rect.fill()
+    }
+
     private func drawCaretMarker(in dirtyRect: NSRect) {
         guard showsCaretMarker, let caretMarker,
               let layoutManager,
@@ -383,7 +400,7 @@ final class LineHighlightTextView: NSTextView {
             var effectiveRange = NSRange(location: 0, length: 0)
             var lineRect = layoutManager.lineFragmentUsedRect(forGlyphAt: glyphIndex, effectiveRange: &effectiveRange)
             lineRect.origin.y += textOrigin.y
-            return NSRect(x: textOrigin.x + lineRect.minX, y: lineRect.minY, width: 1, height: max(1, lineRect.height))
+            return NSRect(x: textOrigin.x + lineRect.maxX, y: lineRect.minY, width: 1, height: max(1, lineRect.height))
         }
         let glyphIndex: Int
         let atLineEnd = clampedLocation >= nsString.length || nsString.substring(with: NSRange(location: max(0, min(clampedLocation, max(0, nsString.length - 1))), length: min(1, nsString.length))).rangeOfCharacter(from: .newlines) != nil

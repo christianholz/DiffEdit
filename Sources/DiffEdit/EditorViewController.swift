@@ -303,6 +303,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         textView.deletionMarkers = []
         committedTextView.deletionMarkers = []
         committedTextView.caretMarker = nil
+        committedTextView.insertionCaretMarker = nil
         committedVisibleBaseLines = []
         statusLabel.stringValue = message
         stagingDiffView.setDocument(rows: [], selectedChanges: [])
@@ -483,6 +484,11 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     }
 
     private func activate(_ buffer: EditorBuffer, deferredHighlights: Bool = false) {
+        if currentRelativePath != buffer.relativePath {
+            lastPastFocus = nil
+            pastManualScrollOffset = 0
+            pastCanonicalScrollY = nil
+        }
         currentFileURL = buffer.url
         currentRelativePath = buffer.relativePath
         updateDocumentVisibility()
@@ -988,6 +994,9 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
             mainGutter?.needsDisplay = true
             changeOverview.needsDisplay = true
         } else if notification.object as AnyObject? === committedScroll.contentView {
+            if !isRenderingPast, let canonical = pastCanonicalScrollY {
+                pastManualScrollOffset = committedScroll.contentView.bounds.minY - canonical
+            }
             committedGutter?.needsDisplay = true
         }
     }
@@ -1393,118 +1402,141 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         }
     }
 
-    private func updateCommittedContext() {
-        let currentLine = (textView.string as NSString).lineIndex(containing: textView.selectedRange().location)
-        let mappedBaseLine = lastDiff.currentToBaseLine[currentLine] ?? currentLine
-        let baseLines = cachedBaseLines
-        var context = ""
-        var contextBaseLines: [Int?] = []
-        let contextRadius = committedContextRadius()
-        let visibleBaseLines = (mappedBaseLine - contextRadius)...(mappedBaseLine + contextRadius)
-        for (offset, index) in visibleBaseLines.enumerated() {
-            if index >= 0 && index < baseLines.count {
-                contextBaseLines.append(index)
-                context += baseLines[index].trimmedTrailingNewline()
-            } else {
-                contextBaseLines.append(nil)
-            }
-            if offset < visibleBaseLines.count - 1 {
-                context += "\n"
-            }
-        }
-        let needsRebuild = committedContextNeedsRefresh || committedVisibleBaseLines != contextBaseLines
-        committedVisibleBaseLines = contextBaseLines
-        let currentLineStart = (textView.string as NSString).lineStartOffset(forLineIndex: currentLine)
-        let currentColumn = max(0, textView.selectedRange().location - currentLineStart)
-        if let visibleLine = contextBaseLines.firstIndex(where: { $0 == mappedBaseLine }) {
-            let baseLineLength = baseLines[safe: mappedBaseLine].map { ($0.trimmedTrailingNewline() as NSString).length } ?? 0
-            let mappedColumn = mappedBaseColumn(currentLine: currentLine, currentColumn: currentColumn, defaultColumn: currentColumn)
-            committedTextView.caretMarker = CaretMarker(line: visibleLine, column: min(mappedColumn, baseLineLength))
-        } else {
-            committedTextView.caretMarker = nil
-        }
-        guard needsRebuild else {
-            emphasizePastText()
-            centerCommittedCaret()
-            return
-        }
-        committedContextNeedsRefresh = false
-        let attributed = NSMutableAttributedString(
-            string: context,
-            attributes: editorAttributes()
-        )
-        let nsContext = context as NSString
-        committedTextView.fullLineHighlightedLines = Set(contextBaseLines.enumerated().compactMap { visibleLine, baseLine in
-            guard let baseLine else { return nil }
-            return lastDiff.baseTouchedLines.contains(baseLine) ? visibleLine : nil
-        })
-        for deletion in lastDiff.deletedWordRanges {
-            guard let visibleLine = contextBaseLines.firstIndex(where: { $0 == deletion.line }) else { continue }
-            let lineStart = nsContext.lineStartOffset(forLineIndex: visibleLine)
-            let range = NSRange(location: lineStart + deletion.range.location, length: deletion.range.length)
-            if NSMaxRange(range) <= attributed.length {
-                attributed.addAttribute(.backgroundColor, value: DiffPalette.deletedText, range: range)
-            }
-        }
-        committedTextView.textStorage?.setAttributedString(attributed)
-        committedGutter?.needsDisplay = true
-        emphasizePastText()
-        centerCommittedCaret()
+    private struct PastFocus: Equatable {
+        enum Kind: Equatable { case word, deletion, insertion, none }
+        let line: Int
+        let column: Int
+        var range: NSRange? = nil
+        var kind: Kind = .none
     }
 
-    private func emphasizePastText() {
-        guard let layout = committedTextView.layoutManager else { return }
-        let text = committedTextView.string as NSString
-        layout.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: text.length))
-        let currentText = textView.string as NSString
+    private var lastPastFocus: PastFocus?
+    private var pastManualScrollOffset: CGFloat = 0
+    private var pastCanonicalScrollY: CGFloat?
+    private var isRenderingPast = false
+
+    // Resolve focus entirely in base-document coordinates. Rendering never
+    // changes this decision, whether invoked by typing, selection, or refresh.
+    private func resolvedPastFocus() -> PastFocus {
+        let current = textView.string as NSString
         let selection = textView.selectedRange()
-        var offset = selection.location
-        // The insertion point just before whitespace still belongs to the
-        // preceding word. Probe that character without moving the real caret.
-        if selection.length == 0, offset > 0, offset <= currentText.length {
-            let previous = currentText.rangeOfComposedCharacterSequence(at: offset - 1)
-            let beforeWhitespace = offset == currentText.length ||
-                currentText.substring(with: currentText.rangeOfComposedCharacterSequence(at: offset))
-                    .rangeOfCharacter(from: .whitespacesAndNewlines) != nil
-            if beforeWhitespace,
-               currentText.substring(with: previous).rangeOfCharacter(from: .whitespacesAndNewlines) == nil {
-                offset = previous.location
+        let caret = min(selection.location, current.length)
+        let currentLine = current.lineIndex(containing: caret)
+        let currentColumn = caret - current.lineStartOffset(forLineIndex: currentLine)
+        let baseLine = min(max(0, lastDiff.currentToBaseLine[currentLine] ?? currentLine), max(0, cachedBaseLines.count - 1))
+        let oldLine = (cachedBaseLines[safe: baseLine] ?? "").trimmedTrailingNewline() as NSString
+        let column = min(oldLine.length, max(0, mappedBaseColumn(currentLine: currentLine, currentColumn: currentColumn, defaultColumn: currentColumn)))
+        var probe = caret
+        if selection.length == 0, caret > 0 {
+            let previous = current.rangeOfComposedCharacterSequence(at: caret - 1)
+            let beforeWhitespace = caret == current.length ||
+                current.substring(with: current.rangeOfComposedCharacterSequence(at: caret)).rangeOfCharacter(from: .whitespacesAndNewlines) != nil
+            if beforeWhitespace, current.substring(with: previous).rangeOfCharacter(from: .whitespacesAndNewlines) == nil {
+                probe = previous.location
             }
         }
-        let insertedSegment = lastDiff.insertedWordRanges.first(where: { NSLocationInRange(offset, $0) })
-        let replacementLink = lastDiff.replacementLinks.first(where: { NSLocationInRange(offset, $0.current) })
-            ?? insertedSegment.flatMap { segment in
-                lastDiff.replacementLinks.first(where: { NSIntersectionRange(segment, $0.current).length > 0 })
+        let insertion = lastDiff.insertedWordRanges.first { NSLocationInRange(probe, $0) }
+        let link = lastDiff.replacementLinks.first {
+            $0.current.length == 0 && selection.length == 0 && caret == $0.current.location
+        } ?? lastDiff.replacementLinks.first { NSLocationInRange(probe, $0.current) }
+            ?? insertion.flatMap { inserted in
+                lastDiff.replacementLinks.first { NSIntersectionRange(inserted, $0.current).length > 0 }
             }
-        if let link = replacementLink,
-           let line = committedVisibleBaseLines.firstIndex(where: { $0 == link.base.line }) {
-            // Word alignment can split a replacement at unchanged spaces even
-            // though its deleted words render as one consecutive red segment.
-            let deletedSegment = lastDiff.deletedWordRanges.first(where: {
+        if let link {
+            let deleted = lastDiff.deletedWordRanges.first {
                 $0.line == link.base.line && NSIntersectionRange($0.range, link.base.range).length > 0
-            })?.range ?? link.base.range
-            let start = text.lineStartOffset(forLineIndex: line)
-            let range = NSRange(location: start + deletedSegment.location, length: deletedSegment.length)
-            if NSMaxRange(range) <= text.length {
-                layout.addTemporaryAttribute(.backgroundColor, value: DiffPalette.activeDeletedText, forCharacterRange: range)
-                committedTextView.caretMarker = CaretMarker(line: line, column: deletedSegment.location)
-            }
-            return
+            } ?? link.base
+            return PastFocus(line: deleted.line, column: deleted.range.location, range: deleted.range, kind: .deletion)
         }
-        // Pure insertions have no corresponding old word to emphasize.
-        guard !lastDiff.insertedWordRanges.contains(where: { NSLocationInRange(offset, $0) }),
-              let marker = committedTextView.caretMarker else { return }
-        let currentLine = currentText.lineIndex(containing: offset)
-        let currentColumn = offset - currentText.lineStartOffset(forLineIndex: currentLine)
-        let column = offset == selection.location ? marker.column : mappedBaseColumn(
-            currentLine: currentLine, currentColumn: currentColumn, defaultColumn: currentColumn
-        )
-        let location = text.lineStartOffset(forLineIndex: marker.line) + column
-        guard location < text.length else { return }
-        let range = committedTextView.selectionRange(forProposedRange: NSRange(location: location, length: 0), granularity: .selectByWord)
-        guard NSMaxRange(range) <= text.length,
-              !text.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        layout.addTemporaryAttribute(.backgroundColor, value: DiffPalette.correspondingWord, forCharacterRange: range)
+        if let insertion, selection.length == 0 {
+            let line = current.lineIndex(containing: insertion.location)
+            let startColumn = insertion.location - current.lineStartOffset(forLineIndex: line)
+            let oldLineIndex = min(max(0, lastDiff.currentToBaseLine[line] ?? baseLine), max(0, cachedBaseLines.count - 1))
+            let length = ((cachedBaseLines[safe: oldLineIndex] ?? "").trimmedTrailingNewline() as NSString).length
+            let anchor = mappedBaseColumn(currentLine: line, currentColumn: startColumn, defaultColumn: startColumn)
+            return PastFocus(line: oldLineIndex, column: min(length, max(0, anchor)), kind: .insertion)
+        }
+        guard insertion == nil else { return PastFocus(line: baseLine, column: column) }
+        let probeColumn = probe - current.lineStartOffset(forLineIndex: currentLine)
+        let oldProbe = probe == caret ? column : mappedBaseColumn(currentLine: currentLine, currentColumn: probeColumn, defaultColumn: probeColumn)
+        guard oldProbe >= 0, oldProbe < oldLine.length else { return PastFocus(line: baseLine, column: column) }
+        var range = oldLine.rangeOfComposedCharacterSequence(at: oldProbe)
+        let wordCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
+        func isWord(_ range: NSRange) -> Bool {
+            oldLine.substring(with: range).rangeOfCharacter(from: wordCharacters) != nil
+        }
+        if isWord(range) {
+            while range.location > 0 {
+                let previous = oldLine.rangeOfComposedCharacterSequence(at: range.location - 1)
+                guard isWord(previous) else { break }
+                range = NSUnionRange(previous, range)
+            }
+            while NSMaxRange(range) < oldLine.length {
+                let next = oldLine.rangeOfComposedCharacterSequence(at: NSMaxRange(range))
+                guard isWord(next) else { break }
+                range = NSUnionRange(range, next)
+            }
+        }
+        guard !oldLine.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return PastFocus(line: baseLine, column: column)
+        }
+        return PastFocus(line: baseLine, column: column, range: range, kind: .word)
+    }
+
+    private func updateCommittedContext() {
+        guard !isRenderingPast else { return }
+        isRenderingPast = true
+        defer { isRenderingPast = false }
+        let focus = resolvedPastFocus()
+        if focus != lastPastFocus { pastManualScrollOffset = 0 }
+        lastPastFocus = focus
+        let radius = committedContextRadius()
+        let indices = (focus.line - radius)...(focus.line + radius)
+        let visibleLines: [Int?] = indices.map { cachedBaseLines.indices.contains($0) ? $0 : nil }
+        let context = visibleLines.map { index in
+            index.map { cachedBaseLines[$0].trimmedTrailingNewline() } ?? ""
+        }.joined(separator: "\n")
+        let needsRebuild = committedContextNeedsRefresh || committedVisibleBaseLines != visibleLines
+        committedVisibleBaseLines = visibleLines
+        let text = context as NSString
+        if needsRebuild {
+            committedContextNeedsRefresh = false
+            let storage = committedTextView.textStorage
+            storage?.beginEditing()
+            if committedTextView.string != context {
+                storage?.setAttributedString(NSAttributedString(string: context, attributes: editorAttributes()))
+            } else {
+                storage?.setAttributes(editorAttributes(), range: NSRange(location: 0, length: text.length))
+            }
+            for deletion in lastDiff.deletedWordRanges {
+                guard let line = visibleLines.firstIndex(where: { $0 == deletion.line }) else { continue }
+                let range = NSRange(location: text.lineStartOffset(forLineIndex: line) + deletion.range.location, length: deletion.range.length)
+                if NSMaxRange(range) <= text.length {
+                    storage?.addAttribute(.backgroundColor, value: DiffPalette.deletedText, range: range)
+                }
+            }
+            storage?.endEditing()
+            committedTextView.fullLineHighlightedLines = Set(visibleLines.enumerated().compactMap { line, base in
+                base.map { lastDiff.baseTouchedLines.contains($0) ? line : nil } ?? nil
+            })
+            committedGutter?.needsDisplay = true
+        }
+        let layout = committedTextView.layoutManager
+        layout?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: text.length))
+        let marker = visibleLines.firstIndex(where: { $0 == focus.line }).map {
+            CaretMarker(line: $0, column: focus.column)
+        }
+        committedTextView.caretMarker = marker
+        committedTextView.insertionCaretMarker = focus.kind == .insertion ? marker : nil
+        if let marker, let highlight = focus.range {
+            let range = NSRange(location: text.lineStartOffset(forLineIndex: marker.line) + highlight.location, length: highlight.length)
+            if NSMaxRange(range) <= text.length {
+                layout?.addTemporaryAttribute(.backgroundColor,
+                    value: focus.kind == .deletion ? DiffPalette.activeDeletedText : DiffPalette.correspondingWord,
+                    forCharacterRange: range)
+            }
+        }
+        centerCommittedCaret(marker)
     }
 
     private func committedContextRadius() -> Int {
@@ -1514,10 +1546,58 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         return max(2, Int(ceil(CGFloat(visibleLineCount) / 2)) + 2)
     }
 
+    var canRestorePrevious: Bool {
+        textView.isEditable && view.window?.firstResponder === textView &&
+            restorationAction(at: textView.selectedRange().location) != nil
+    }
+
+    @objc func restorePrevious(_ sender: Any?) {
+        guard canRestorePrevious, let action = restorationAction(at: textView.selectedRange().location) else { return }
+        restore(action)
+    }
+
+    private func restorationAction(at characterIndex: Int) -> RevertAction? {
+        guard mode == .editing, textView.isEditable,
+              let inserted = lastDiff.insertedWordRanges.first(where: { NSLocationInRange(characterIndex, $0) }),
+              let link = lastDiff.replacementLinks.first(where: {
+                  $0.current.length > 0 && NSIntersectionRange(inserted, $0.current).length > 0
+              }) else { return nil }
+        let deleted = lastDiff.deletedWordRanges.first(where: {
+            $0.line == link.base.line && NSIntersectionRange($0.range, link.base.range).length > 0
+        }) ?? link.base
+        // Restore a consecutive replacement group, never use nearby deletions
+        // as a guess for text that was only inserted.
+        let group = lastDiff.replacementLinks.filter {
+            $0.current.length > 0 && $0.base.line == deleted.line &&
+                NSIntersectionRange($0.base.range, deleted.range).length > 0 &&
+                NSIntersectionRange($0.current, inserted).length > 0
+        }
+        guard let start = group.map({ $0.current.location }).min(),
+              let end = group.map({ NSMaxRange($0.current) }).max() else { return nil }
+        let range = NSRange(location: start, length: end - start)
+        // A joined-line replacement can refer to several old lines. Include
+        // every part of that same replacement, with its original line breaks.
+        let related = group + lastDiff.replacementLinks.filter {
+            $0.base.line != deleted.line && NSIntersectionRange($0.current, range).length > 0
+        }
+        let base = baseText as NSString
+        let oldRanges = related.map { link -> NSRange in
+            let segment = lastDiff.deletedWordRanges.first(where: {
+                $0.line == link.base.line && NSIntersectionRange($0.range, link.base.range).length > 0
+            }) ?? link.base
+            return NSRange(location: base.lineStartOffset(forLineIndex: segment.line) + segment.range.location, length: segment.range.length)
+        }
+        guard let oldStart = oldRanges.map(\.location).min(),
+              let oldEnd = oldRanges.map({ NSMaxRange($0) }).max(),
+              oldEnd <= base.length else { return nil }
+        return RevertAction(currentRange: range, replacement: base.substring(with: NSRange(location: oldStart, length: oldEnd - oldStart)))
+
+    }
+
     private func contextMenu(at characterIndex: Int) -> NSMenu? {
-        guard let action = lastDiff.revertActions.first(where: { NSLocationInRange(characterIndex, $0.currentRange) }) else { return nil }
+        guard let action = restorationAction(at: characterIndex) else { return nil }
         let menu = NSMenu()
-        let title = action.replacement.isEmpty ? "Discard" : "Restore Previous"
+        let title = "Restore '" + action.replacement + "'"
         let item = NSMenuItem(title: title, action: #selector(applyRevertAction(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = action
@@ -1527,12 +1607,15 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
 
     @objc private func applyRevertAction(_ sender: NSMenuItem) {
         guard let action = sender.representedObject as? RevertAction else { return }
-        let oldString = textView.string as NSString
-        guard NSMaxRange(action.currentRange) <= oldString.length else { return }
-        let replacement = NSAttributedString(string: action.replacement, attributes: editorAttributes())
-        textView.shouldChangeText(in: action.currentRange, replacementString: action.replacement)
-        textView.textStorage?.replaceCharacters(in: action.currentRange, with: replacement)
-        textView.didChangeText()
+        restore(action)
+    }
+
+    private func restore(_ action: RevertAction) {
+        guard textView.isEditable, NSMaxRange(action.currentRange) <= (textView.string as NSString).length else { return }
+        textView.breakUndoCoalescing()
+        textView.insertText(action.replacement, replacementRange: action.currentRange)
+        textView.breakUndoCoalescing()
+        textView.undoManager?.setActionName("Restore previous")
     }
 
     private func paragraphBoundary(up: Bool) -> Int {
@@ -1579,8 +1662,8 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         return max(0, best.baseColumn + (currentColumn - best.currentColumn))
     }
 
-    private func centerCommittedCaret() {
-        guard let marker = committedTextView.caretMarker,
+    private func centerCommittedCaret(_ resolvedMarker: CaretMarker?) {
+        guard let marker = resolvedMarker,
               let layoutManager = committedTextView.layoutManager,
               let textContainer = committedTextView.textContainer else { return }
         layoutManager.ensureLayout(for: textContainer)
@@ -1595,7 +1678,8 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         rect.origin.y += committedTextView.textContainerOrigin.y
         let viewport = committedScroll.contentView.bounds
         let targetY = max(0, rect.midY - viewport.height / 2)
-        committedScroll.contentView.scroll(to: NSPoint(x: 0, y: targetY))
+        pastCanonicalScrollY = targetY
+        committedScroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, targetY + pastManualScrollOffset)))
         committedScroll.reflectScrolledClipView(committedScroll.contentView)
     }
 

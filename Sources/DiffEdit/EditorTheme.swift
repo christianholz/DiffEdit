@@ -6,6 +6,7 @@ enum DiffPalette {
     static let activeLineOverlay = dynamic(light: "#6e77811f", dark: "#ffffff0d")
     static let activeLineGutter = dynamic(light: "#d8dee4", dark: "#34373a")
     static let insertedText = dynamic(light: "#aceebb80", dark: "#2ea04340")
+    static let insertionMarker = dynamic(light: "#1a7f37", dark: "#3fb950")
     static let deletedText = dynamic(light: "#ffcecb80", dark: "#f8514940")
     static let activeDeletedText = dynamic(light: "#ff938a", dark: "#b43d38")
     static let correspondingWord = dynamic(light: "#b9d9f4", dark: "#35516b")

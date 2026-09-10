@@ -468,7 +468,7 @@ enum DiffEngine {
                     if whole.length > 0 {
                         result.revertActions.append(RevertAction(currentRange: whole, replacement: ""))
                     }
-                    result.currentToBaseLine[insertion.0] = min(insertion.0, max(0, baseLines.count - 1))
+                    result.currentToBaseLine[insertion.0] = min(pendingDeletes.isEmpty ? oldIndex : insertion.0, max(0, baseLines.count - 1))
                 }
             }
             pendingDeletes.removeAll()
@@ -710,7 +710,65 @@ enum DiffEngine {
             newKeys[newTokens.count - 1 - suffix] = oldKeys[oldTokens.count - 1 - suffix]
             suffix += 1
         }
-        let operations = sequenceDiff(old: oldKeys, new: newKeys)
+        // Context finds stable anchors, but it is not itself evidence that a
+        // character changed. Refine each intervening block using literal text
+        // so identical punctuation and whitespace remain unchanged.
+        let contextualOperations = sequenceDiff(old: oldKeys, new: newKeys)
+        var operations: [Operation] = []
+        var oldCursor = 0
+        var newCursor = 0
+        var oldBlock: [String] = []
+        var newBlock: [String] = []
+        func flushLiteralBlock() {
+            operations += sequenceDiff(old: oldBlock, new: newBlock)
+            oldBlock.removeAll(keepingCapacity: true)
+            newBlock.removeAll(keepingCapacity: true)
+        }
+        for operation in contextualOperations {
+            switch operation {
+            case .equal:
+                flushLiteralBlock()
+                operations.append(.equal)
+                oldCursor += 1
+                newCursor += 1
+            case .delete:
+                oldBlock.append(oldTokens[oldCursor].text)
+                oldCursor += 1
+            case .insert:
+                newBlock.append(newTokens[newCursor].text)
+                newCursor += 1
+            }
+        }
+        flushLiteralBlock()
+        // When an equal separator precedes an insertion/deletion ending in the
+        // same separator, align it with the unchanged text after the edit.
+        // For example, " subjects (" -> " design (" keeps the final " (".
+        var scanOld = 0
+        var scanNew = 0
+        for index in operations.indices {
+            if case .equal = operations[index], index + 1 < operations.count,
+               tokenCategory(oldTokens[scanOld].text) != .word {
+                var end = index + 1
+                if case .insert = operations[end] {
+                    while end < operations.count, case .insert = operations[end] { end += 1 }
+                    if newTokens[scanNew + end - index - 1].text == oldTokens[scanOld].text {
+                        operations[index] = .insert
+                        operations[end - 1] = .equal
+                    }
+                } else if case .delete = operations[end] {
+                    while end < operations.count, case .delete = operations[end] { end += 1 }
+                    if oldTokens[scanOld + end - index - 1].text == newTokens[scanNew].text {
+                        operations[index] = .delete
+                        operations[end - 1] = .equal
+                    }
+                }
+            }
+            switch operations[index] {
+            case .equal: scanOld += 1; scanNew += 1
+            case .delete: scanOld += 1
+            case .insert: scanNew += 1
+            }
+        }
         var deleted: [NSRange] = []
         var inserted: [NSRange] = []
         var markerColumns: [Int] = []
@@ -738,6 +796,10 @@ enum DiffEngine {
                 } else {
                     markerColumns.append(0)
                 }
+                let first = pendingDeletedRanges[0]
+                let last = pendingDeletedRanges[pendingDeletedRanges.count - 1]
+                replacements.append((NSRange(location: first.location, length: NSMaxRange(last) - first.location),
+                                     NSRange(location: markerColumns[markerColumns.count - 1], length: 0)))
             }
             pendingDeletedRanges.removeAll()
             pendingInsertedRanges.removeAll()
@@ -768,7 +830,15 @@ enum DiffEngine {
         let normalizedInsertedRanges = normalizedHighlightRanges(ranges: inserted, in: new)
         let candidateMarkerColumns = semanticMarkerColumns.isEmpty
             ? Array(Set(markerColumns)).sorted()
-            : semanticMarkerColumns
+            : semanticMarkerColumns.map { semanticColumn in
+                // Word-only alignment locates the next word, skipping its
+                // leading space. Use the literal edit boundary when available,
+                // so the marker doesn't occupy an unchanged word's caret slot.
+                markerColumns.filter { column in
+                    let gap = NSRange(location: min(column, semanticColumn), length: abs(column - semanticColumn))
+                    return (new as NSString).substring(with: gap).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }.min(by: { abs($0 - semanticColumn) < abs($1 - semanticColumn) }) ?? semanticColumn
+            }
         let pureDeletionMarkerColumns = candidateMarkerColumns.filter { markerColumn in
             !normalizedInsertedRanges.contains { insertionRange in
                 markerTouchesInsertion(
@@ -783,7 +853,17 @@ enum DiffEngine {
             normalizedInsertedRanges,
             pureDeletionMarkerColumns,
             columnMap,
-            replacements
+            replacements.compactMap { pair in
+                guard pair.new.length == 0 else { return pair }
+                // Semantic markers may sit after an unchanged space. Keep the
+                // deleted range linked to the marker that is actually drawn.
+                guard let column = pureDeletionMarkerColumns.min(by: {
+                    abs($0 - pair.new.location) < abs($1 - pair.new.location)
+                }) else { return nil }
+                let gap = NSRange(location: min(column, pair.new.location), length: abs(column - pair.new.location))
+                guard (new as NSString).substring(with: gap).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return (pair.old, NSRange(location: column, length: 0))
+            }
         )
     }
 
@@ -894,13 +974,19 @@ enum DiffEngine {
         var index = 0
         while index < nsString.length {
             let start = index
-            let first = nsString.substring(with: NSRange(location: index, length: 1))
+            let firstRange = nsString.rangeOfComposedCharacterSequence(at: index)
+            let first = nsString.substring(with: firstRange)
             let category = tokenCategory(first)
-            index += 1
-            while index < nsString.length {
-                let next = nsString.substring(with: NSRange(location: index, length: 1))
+            index = NSMaxRange(firstRange)
+            // Only words form multi-character tokens. Match whitespace and
+            // punctuation individually, preserving complete Unicode graphemes.
+            // Thus deleting a word doesn't insert its surrounding spaces, and
+            // changing a semicolon doesn't replace adjacent closing brackets.
+            while category == .word, index < nsString.length {
+                let nextRange = nsString.rangeOfComposedCharacterSequence(at: index)
+                let next = nsString.substring(with: nextRange)
                 if tokenCategory(next) != category { break }
-                index += 1
+                index = NSMaxRange(nextRange)
             }
             let range = NSRange(location: start, length: index - start)
             tokens.append((nsString.substring(with: range), range))

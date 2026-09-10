@@ -54,6 +54,7 @@ contains staged files outside the opened folder.
 | Action | Shortcut |
 | --- | --- |
 | Quick Open | <kbd>⌘T</kbd> |
+| Restore previous replacement | <kbd>⌘D</kbd> |
 | Save current file | <kbd>⌘S</kbd> |
 | Find / replace | <kbd>⌘F</kbd> / <kbd>⌥⌘F</kbd> |
 | Next / previous match | <kbd>⌘G</kbd> / <kbd>⇧⌘G</kbd> |

@@ -111,6 +111,65 @@ final class DiffEngineTests: XCTestCase {
         }
     }
 
+    func testUnchangedOpeningParenthesisSurvivesNeighboringWordEdits() {
+        let base = #"We compared three presentations of one visit within subjects (Table~\ref{tab:conditions}). The \emph{photo album} (A) showed the photographs the visitor had taken during the visit, in order, on a laptop;"#
+        let current = #"We compared three presentations of one visit using a within-subjects design (Table~\ref{tab:conditions}). The \emph{photo album} (A) showed the visitor's photographs in chronological order on a laptop."#
+        let result = DiffEngine.diff(base: base, current: current)
+        let oldParenthesis = (base as NSString).range(of: "(Table").location
+        let newParenthesis = (current as NSString).range(of: "(Table").location
+        let oldUnchangedPair = NSRange(location: oldParenthesis - 1, length: 2)
+        let newUnchangedPair = NSRange(location: newParenthesis - 1, length: 2)
+        XCTAssertFalse(result.deletedWordRanges.contains { NSIntersectionRange(oldUnchangedPair, $0.range).length > 0 })
+        XCTAssertFalse(result.insertedWordRanges.contains { NSIntersectionRange(newUnchangedPair, $0).length > 0 })
+        XCTAssertEqual(result.currentToBaseColumn[LineColumn(line: 0, column: newParenthesis)], oldParenthesis)
+        let design = (current as NSString).range(of: "design")
+        XCTAssertTrue(result.insertedWordRanges.contains { NSIntersectionRange($0, design).length > 0 })
+    }
+
+    func testUnchangedSeparatorsSurviveEditsButChangedPunctuationRemainsVisible() {
+        for separator in [" (", " [", " {", ") ", "] ", "} ", ", ", ": ", " — ", "  ", "\t"] {
+            var edits = [("revised", "shared"), ("old", "different")]
+            // Spaces between two changed words intentionally share their
+            // continuous highlight; punctuation must still interrupt it.
+            if !separator.trimmingCharacters(in: .whitespaces).isEmpty {
+                edits.append(("revised", "different"))
+            }
+            for (left, right) in edits {
+                let base = "alpha old" + separator + "shared tail"
+                let current = "alpha " + left + separator + right + " ending"
+                let result = DiffEngine.diff(base: base, current: current)
+                let oldRange = NSRange(location: ("alpha old" as NSString).length, length: (separator as NSString).length)
+                let newRange = NSRange(location: (("alpha " + left) as NSString).length, length: (separator as NSString).length)
+                XCTAssertFalse(result.deletedWordRanges.contains { NSIntersectionRange($0.range, oldRange).length > 0 }, separator)
+                XCTAssertFalse(result.insertedWordRanges.contains { NSIntersectionRange($0, newRange).length > 0 }, separator)
+            }
+        }
+        let base = "alpha old, shared tail"
+        let current = "alpha revised; shared ending"
+        let result = DiffEngine.diff(base: base, current: current)
+        XCTAssertTrue(result.deletedWordRanges.contains { NSLocationInRange((base as NSString).range(of: ",").location, $0.range) })
+        XCTAssertTrue(result.insertedWordRanges.contains { NSLocationInRange((current as NSString).range(of: ";").location, $0) })
+    }
+
+    func testReplacingAWordKeepsItsSurroundingSpacesUnhighlightedThroughout() {
+        let base = "one a word\n"
+        for replacement in ["", "t", "th", "the"] {
+            let current = "one " + replacement + " word\n"
+            let result = DiffEngine.diff(base: base, current: current)
+            for space in [3, 4 + (replacement as NSString).length] {
+                XCTAssertFalse(result.insertedWordRanges.contains { NSLocationInRange(space, $0) }, replacement)
+            }
+        }
+    }
+
+    func testPunctuationEditOnlyHighlightsChangedCharacter() {
+        let base = #"See (Table~\ref{tab:conditions}); next."#
+        let current = #"See (Table~\ref{tab:conditions}). next."#
+        let result = DiffEngine.diff(base: base, current: current)
+        XCTAssertEqual(result.deletedWordRanges.map { (base as NSString).substring(with: $0.range) }, [";"])
+        XCTAssertEqual(highlightedStrings(result.insertedWordRanges, in: current), ["."])
+    }
+
     func testPureMidLineDeletionAddsAnInlineMarker() {
         let result = DiffEngine.diff(
             base: "alpha removed beta\n",
@@ -118,7 +177,7 @@ final class DiffEngineTests: XCTestCase {
         )
 
         XCTAssertEqual(result.currentDeletionMarkers.map(\.line), [0])
-        XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [6])
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [5])
         XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.inline])
     }
 
@@ -129,7 +188,7 @@ final class DiffEngineTests: XCTestCase {
         )
 
         XCTAssertEqual(result.currentDeletionMarkers.map(\.line), [0])
-        XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [12])
+        XCTAssertEqual(result.currentDeletionMarkers.map(\.column), [11])
         XCTAssertEqual(result.currentDeletionMarkers.map(\.kind), [.inline])
     }
 
@@ -214,7 +273,7 @@ final class DiffEngineTests: XCTestCase {
         let current = "hello 👋🏽 friend\n"
         let result = DiffEngine.diff(base: "hello friend\n", current: current)
 
-        XCTAssertEqual(highlightedStrings(result.insertedWordRanges, in: current), ["👋🏽 "])
+        XCTAssertEqual(highlightedStrings(result.insertedWordRanges, in: current), [" 👋🏽"])
         XCTAssertTrue(result.insertedWordRanges.allSatisfy { NSMaxRange($0) <= (current as NSString).length })
     }
 
@@ -819,6 +878,48 @@ final class TextSelectionSnapshotTests: XCTestCase {
 }
 
 final class WorkspaceModeUITests: XCTestCase {
+    func testRestoreReplacementUsesExactTextAndSupportsUndoRedo() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runGitForUITest(["init", "-q"], in: directory)
+        try runGitForUITest(["config", "user.name", "DiffEdit Tests"], in: directory)
+        try runGitForUITest(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        let file = directory.appendingPathComponent("restore.txt")
+        let base = "alpha old tired words omega\nunchanged ending\n"
+        let revised = "alpha extraordinary fresh phrase omega\nunchanged ending\nonly inserted\n"
+        try base.write(to: file, atomically: true, encoding: .utf8)
+        try runGitForUITest(["add", "."], in: directory)
+        try runGitForUITest(["commit", "-qm", "initial"], in: directory)
+        try revised.write(to: file, atomically: true, encoding: .utf8)
+        let editor = EditorViewController()
+        let window = NSWindow(contentViewController: editor)
+        defer { window.orderOut(nil) }
+        XCTAssertTrue(try editor.open(file: file, relativePath: "restore.txt", repository: Repository(rootURL: directory), onSaved: {}))
+        let text = try XCTUnwrap(descendants(of: editor.view, matching: LineHighlightTextView.self).first(where: \.isEditable))
+        window.makeFirstResponder(text)
+        text.setSelectedRange(NSRange(location: 2, length: 0))
+        XCTAssertFalse(editor.canRestorePrevious)
+        let insertion = (revised as NSString).range(of: "only inserted").location
+        text.setSelectedRange(NSRange(location: insertion, length: 0))
+        XCTAssertFalse(editor.canRestorePrevious)
+        XCTAssertNil(text.contextMenuProvider?(insertion))
+        text.setSelectedRange(NSRange(location: 8, length: 0))
+        XCTAssertTrue(editor.canRestorePrevious)
+        let menu = try XCTUnwrap(text.contextMenuProvider?(8))
+        XCTAssertEqual(menu.items.first?.title, "Restore 'old tired words'")
+        let undo = try XCTUnwrap(text.undoManager)
+        editor.restorePrevious(nil)
+        let restored = "alpha old tired words omega\nunchanged ending\nonly inserted\n"
+        XCTAssertEqual(text.string, restored)
+        XCTAssertFalse(editor.canRestorePrevious)
+        XCTAssertTrue(undo.canUndo)
+        undo.undo()
+        XCTAssertEqual(text.string, revised)
+        undo.redo()
+        XCTAssertEqual(text.string, restored)
+    }
+
     func testPastPaneEmphasizesReplacementAsAStableUnit() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -827,10 +928,10 @@ final class WorkspaceModeUITests: XCTestCase {
         try runGitForUITest(["config", "user.name", "DiffEdit Tests"], in: directory)
         try runGitForUITest(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
         let file = directory.appendingPathComponent("replacement.txt")
-        try "alpha old tired words omega\n".write(to: file, atomically: true, encoding: .utf8)
+        try "alpha old tired words omega was the space built from that graph.\nunchanged tail\nto differ in how much of a visit is factual knowledge\n".write(to: file, atomically: true, encoding: .utf8)
         try runGitForUITest(["add", "."], in: directory)
         try runGitForUITest(["commit", "-qm", "initial"], in: directory)
-        try "alpha extraordinary fresh phrase omega\n".write(to: file, atomically: true, encoding: .utf8)
+        try "alpha extraordinary fresh phrase omega was built from that graph.\nunchanged newly added tail\nto vary the relative importance of factual knowledge\n".write(to: file, atomically: true, encoding: .utf8)
         let editor = EditorViewController()
         let window = NSWindow(contentViewController: editor)
         defer { window.orderOut(nil) }
@@ -860,6 +961,49 @@ final class WorkspaceModeUITests: XCTestCase {
             XCTAssertEqual(layout.temporaryAttribute(.backgroundColor, atCharacterIndex: unchanged.location, effectiveRange: &effective) as? NSColor, DiffPalette.correspondingWord)
             XCTAssertEqual(effective, unchanged)
         }
+        let built = (current.string as NSString).range(of: "built").location
+        current.setSelectedRange(NSRange(location: built - 1, length: 0))
+        editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+        let deletion = (past.string as NSString).range(of: "the space")
+        var emphasized = NSRange()
+        XCTAssertEqual(layout.temporaryAttribute(.backgroundColor, atCharacterIndex: deletion.location, effectiveRange: &emphasized) as? NSColor, DiffPalette.activeDeletedText)
+        XCTAssertEqual(NSIntersectionRange(emphasized, deletion), deletion)
+        current.setSelectedRange(NSRange(location: built + 1, length: 0))
+        editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+        XCTAssertNil(layout.temporaryAttribute(.backgroundColor, atCharacterIndex: deletion.location, effectiveRange: nil))
+
+        let addition = (current.string as NSString).range(of: "newly added")
+        for offset in addition.location..<NSMaxRange(addition) {
+            current.setSelectedRange(NSRange(location: offset, length: 0))
+            editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+            let anchor = try XCTUnwrap(past.insertionCaretMarker)
+            XCTAssertEqual(anchor.column, 9)
+            let start = (past.string as NSString).lineStartOffset(forLineIndex: anchor.line)
+            XCTAssertTrue((past.string as NSString).substring(from: start).hasPrefix("unchanged tail"))
+        }
+        for offset in [2, 8] {
+            current.setSelectedRange(NSRange(location: offset, length: 0))
+            editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+            XCTAssertNil(past.insertionCaretMarker)
+        }
+
+        let phrase = "to vary the relative importance of factual knowledge"
+        let phraseStart = (current.string as NSString).range(of: phrase).location
+        let phraseLine = (current.string as NSString).lineIndex(containing: phraseStart)
+        let boundary = (phrase as NSString).range(of: " factual").location
+        XCTAssertEqual(current.deletionMarkers.first(where: { $0.line == phraseLine })?.column, boundary)
+        for word in ["factual", "knowledge"] {
+            let currentWord = (current.string as NSString).range(of: word)
+            for offset in currentWord.location...NSMaxRange(currentWord) {
+                current.setSelectedRange(NSRange(location: offset, length: 0))
+                editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+                let oldWord = (past.string as NSString).range(of: word)
+                var effective = NSRange()
+                XCTAssertEqual(layout.temporaryAttribute(.backgroundColor, atCharacterIndex: oldWord.location, effectiveRange: &effective) as? NSColor, DiffPalette.correspondingWord)
+                XCTAssertEqual(effective, oldWord)
+            }
+        }
+
     }
 
     func testSplitEditedParagraphKeepsPastPaneAtCorrespondingSentence() throws {
@@ -939,6 +1083,25 @@ final class WorkspaceModeUITests: XCTestCase {
         let glyph = layout.glyphIndexForCharacter(at: location)
         let rect = layout.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
         XCTAssertEqual(rect.midY + past.textContainerOrigin.y, viewport.bounds.midY, accuracy: 1)
+        // Foreground refresh must use the same focus/geometry as caret updates,
+        // including an explicit user scroll in the past pane.
+        for scrollOffset in [CGFloat(0), CGFloat(20)] {
+            viewport.scroll(to: NSPoint(x: 0, y: viewport.bounds.minY + scrollOffset))
+            let expectedOrigin = viewport.bounds.origin
+            let expectedMarker = try XCTUnwrap(past.caretMarker)
+            for _ in 0..<3 {
+                editor.captureForegroundState()
+                let request = try XCTUnwrap(editor.foregroundFileRefreshRequest())
+                XCTAssertTrue(editor.apply(PreparedForegroundFileRefresh(
+                    request: request, diskText: paragraph + "\n",
+                    diskModificationDate: request.knownDiskModificationDate, committedText: paragraph + "\n"
+                )))
+                editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+                XCTAssertEqual(viewport.bounds.minY, expectedOrigin.y, accuracy: 0.5)
+                XCTAssertEqual(past.caretMarker?.line, expectedMarker.line)
+                XCTAssertEqual(past.caretMarker?.column, expectedMarker.column)
+            }
+        }
         current.setSelectedRange(NSRange(location: 0, length: 0))
         editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
         XCTAssertEqual(viewport.bounds.minY, initialY, accuracy: 1)
@@ -962,14 +1125,14 @@ final class WorkspaceModeUITests: XCTestCase {
         window.setContentSize(NSSize(width: 900, height: 700))
         XCTAssertTrue(try editor.open(file: file, relativePath: "markers.txt", repository: Repository(rootURL: directory), onSaved: {}))
         let text = try XCTUnwrap(descendants(of: editor.view, matching: LineHighlightTextView.self).first(where: \.isEditable))
-        XCTAssertEqual(text.deletionMarkers.first?.column, 6)
+        XCTAssertEqual(text.deletionMarkers.first?.column, 5)
         text.insertText("X", replacementRange: NSRange(location: 0, length: 0))
-        XCTAssertEqual(text.deletionMarkers.first?.column, 7)
+        XCTAssertEqual(text.deletionMarkers.first?.column, 6)
         text.insertText("Y", replacementRange: NSRange(location: 11, length: 0))
-        XCTAssertEqual(text.deletionMarkers.first?.column, 7)
+        XCTAssertEqual(text.deletionMarkers.first?.column, 6)
         text.insertText("\n", replacementRange: NSRange(location: 3, length: 0))
         XCTAssertEqual(text.deletionMarkers.first?.line, 1)
-        XCTAssertEqual(text.deletionMarkers.first?.column, 4)
+        XCTAssertEqual(text.deletionMarkers.first?.column, 3)
         XCTAssertTrue(text.fullLineHighlightedLines.isSuperset(of: [0, 1]))
     }
 

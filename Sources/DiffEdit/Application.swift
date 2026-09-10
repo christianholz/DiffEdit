@@ -13,7 +13,7 @@ enum DiffEditApplication {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, AppCommands {
+final class AppDelegate: NSObject, NSApplicationDelegate, AppCommands, NSMenuItemValidation {
     private var windowControllersByPath: [String: WindowController] = [:]
     private let recentFoldersKey = "RecentFolders"
     private(set) var terminationApproved = false
@@ -81,6 +81,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AppCommands {
     func findNext(_ sender: Any?) { activeMainController?.findNext(sender) }
     func findPrevious(_ sender: Any?) { activeMainController?.findPrevious(sender) }
     func replaceText(_ sender: Any?) { activeMainController?.replaceText(sender) }
+
+    func restorePrevious(_ sender: Any?) { activeMainController?.restorePrevious(sender) }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(AppCommands.restorePrevious(_:)) {
+            return activeMainController?.canRestorePrevious == true
+        }
+        return true
+    }
 
     func toggleWordWrap(_ sender: Any?) {
         activeMainController?.toggleWordWrap(sender)
@@ -216,6 +225,11 @@ enum MainMenu {
             item.target = appDelegate
         }
 
+        editMenu.addItem(.separator())
+        let restoreItem = editMenu.addItem(withTitle: "Restore previous", action: #selector(AppCommands.restorePrevious(_:)), keyEquivalent: "d")
+        restoreItem.keyEquivalentModifierMask = [.command]
+        restoreItem.target = appDelegate
+
         let viewItem = NSMenuItem()
         mainMenu.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
@@ -284,6 +298,7 @@ enum MainMenu {
 }
 
 @objc protocol AppCommands {
+    func restorePrevious(_ sender: Any?)
     func findText(_ sender: Any?)
     func findNext(_ sender: Any?)
     func findPrevious(_ sender: Any?)
@@ -425,6 +440,13 @@ final class MainViewController: NSSplitViewController, AppCommands {
     func decreaseFontSize(_ sender: Any?) {
         guard !isCommitting else { return }
         editor.adjustFontSize(by: -1)
+    }
+
+    var canRestorePrevious: Bool { !isCommitting && editor.canRestorePrevious }
+
+    func restorePrevious(_ sender: Any?) {
+        guard !isCommitting else { return }
+        editor.restorePrevious(sender)
     }
 
     func quickOpen(_ sender: Any?) {
