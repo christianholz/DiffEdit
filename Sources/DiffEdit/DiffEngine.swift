@@ -384,6 +384,16 @@ enum DiffEngine {
                 pendingInserts.removeAll()
                 return
             }
+            if !pendingDeletes.isEmpty, !pendingInserts.isEmpty,
+               pendingDeletes.count != pendingInserts.count,
+               pendingDeletes.count == 1 || pendingInserts.count == 1 {
+                applySplitReplacement(old: pendingDeletes, new: pendingInserts,
+                                      currentStart: (current as NSString).lineStartOffset(forLineIndex: pendingInserts[0].0),
+                                      result: &result)
+                pendingDeletes.removeAll()
+                pendingInserts.removeAll()
+                return
+            }
             let isPureLineDeletion = !pendingDeletes.isEmpty && pendingInserts.isEmpty
             var addedBoundaryDeletionMarker = false
             let boundaryDeletionMarker: DeletionMarker? = {
@@ -483,6 +493,54 @@ enum DiffEngine {
         flushChangedBlock()
         result.currentDeletionMarkers = coalescedDeletionMarkers(result.currentDeletionMarkers, lines: currentLines)
         return result
+    }
+
+    private static func applySplitReplacement(
+        old: [(Int, String)], new: [(Int, String)], currentStart: Int, result: inout DiffResult
+    ) {
+        let oldText = old.map { $0.1 }.joined() as NSString
+        let newText = new.map { $0.1 }.joined() as NSString
+        let words = wordDiff(old: oldText as String, new: newText as String)
+        func baseRanges(_ range: NSRange) -> [LineRange] {
+            old.enumerated().compactMap { index, item in
+                let start = oldText.lineStartOffset(forLineIndex: index)
+                let overlap = NSIntersectionRange(range, NSRange(location: start, length: (item.1.trimmedTrailingNewline() as NSString).length))
+                return overlap.length > 0 ? LineRange(line: item.0, range: NSRange(location: overlap.location - start, length: overlap.length)) : nil
+            }
+        }
+        result.deletedWordRanges += words.deleted.flatMap(baseRanges)
+        result.insertedWordRanges += words.inserted.map {
+            NSRange(location: currentStart + $0.location, length: $0.length)
+        }
+        for pair in words.replacements {
+            for base in baseRanges(pair.old) {
+                result.replacementLinks.append((NSRange(location: currentStart + pair.new.location, length: pair.new.length), base))
+            }
+        }
+        for column in words.deletionMarkerColumns {
+            let line = newText.lineIndex(containing: column)
+            result.currentDeletionMarkers.append(DeletionMarker(
+                line: new[0].0 + line, column: column - newText.lineStartOffset(forLineIndex: line)
+            ))
+        }
+        for (currentOffset, baseOffset) in words.currentToBaseColumn.sorted(by: { $0.key < $1.key }) {
+            let currentLine = newText.lineIndex(containing: currentOffset)
+            let baseLine = oldText.lineIndex(containing: baseOffset)
+            guard currentLine < new.count, baseLine < old.count else { continue }
+            let globalLine = new[currentLine].0
+            if result.currentToBaseLine[globalLine] == nil {
+                result.currentToBaseLine[globalLine] = old[baseLine].0
+            }
+            if result.currentToBaseLine[globalLine] == old[baseLine].0 {
+                result.currentToBaseColumn[LineColumn(line: globalLine, column: currentOffset - newText.lineStartOffset(forLineIndex: currentLine))] = baseOffset - oldText.lineStartOffset(forLineIndex: baseLine)
+            }
+        }
+        for line in new where result.currentToBaseLine[line.0] == nil {
+            result.currentToBaseLine[line.0] = old[0].0
+        }
+        result.revertActions.append(RevertAction(
+            currentRange: NSRange(location: currentStart, length: newText.length), replacement: oldText as String
+        ))
     }
 
     // A sentence split is one text edit across multiple logical lines, not a

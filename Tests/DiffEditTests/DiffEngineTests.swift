@@ -842,7 +842,7 @@ final class WorkspaceModeUITests: XCTestCase {
         let layout = try XCTUnwrap(past.layoutManager)
         XCTAssertFalse(past.showsCaretMarker)
         let oldRange = (past.string as NSString).range(of: "old tired words")
-        for offset in 6..<32 {
+        for offset in 6...32 {
             current.setSelectedRange(NSRange(location: offset, length: 0))
             editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
             var effective = NSRange()
@@ -851,11 +851,59 @@ final class WorkspaceModeUITests: XCTestCase {
             XCTAssertEqual(effective, oldRange)
             XCTAssertEqual(past.caretMarker?.column, 6)
         }
-        current.setSelectedRange(NSRange(location: 2, length: 0))
-        editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
-        XCTAssertNil(layout.temporaryAttribute(.backgroundColor, atCharacterIndex: oldRange.location, effectiveRange: nil))
-        let unchanged = (past.string as NSString).range(of: "alpha")
-        XCTAssertEqual(layout.temporaryAttribute(.backgroundColor, atCharacterIndex: unchanged.location, effectiveRange: nil) as? NSColor, DiffPalette.correspondingWord)
+        for offset in [2, 5] {
+            current.setSelectedRange(NSRange(location: offset, length: 0))
+            editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+            XCTAssertNil(layout.temporaryAttribute(.backgroundColor, atCharacterIndex: oldRange.location, effectiveRange: nil))
+            let unchanged = (past.string as NSString).range(of: "alpha")
+            var effective = NSRange()
+            XCTAssertEqual(layout.temporaryAttribute(.backgroundColor, atCharacterIndex: unchanged.location, effectiveRange: &effective) as? NSColor, DiffPalette.correspondingWord)
+            XCTAssertEqual(effective, unchanged)
+        }
+    }
+
+    func testSplitEditedParagraphKeepsPastPaneAtCorrespondingSentence() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runGitForUITest(["init", "-q"], in: directory)
+        try runGitForUITest(["config", "user.name", "DiffEdit Tests"], in: directory)
+        try runGitForUITest(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        let prefix = String(repeating: "Context line.\n", count: 48)
+        let oldParagraph = #"Everything Keepsake builds is made from what the visitor looked at and said, so the visit is recorded without the companion setting the agenda. The visitor tours the museum with the Gemini app on a phone, under a venue-specific instruction that casts the companion as a knowledgeable friend who explains what the visitor has already chosen to look at and is told not to redirect them, rank works or attribute feelings to them (supplementary material). The instruction constrains the companion but does not make the recording a clean trace of attention (Section~\ref{sec:f-omissions}). Visitors also photograph moments they want to keep, as screenshots of the companion's camera view so that they need not leave the conversation; the study uses these photographs unchanged as the photo album."#
+        let firstSentence = #"Everything Keepsake builds derives from what the visitor looked at and said, so the visit is recorded without the companion setting the agenda."#
+        let secondSentence = #"The visitor tours the museum with the Gemini app on a phone. A venue-specific instruction casts the companion as a knowledgeable friend who explains what the visitor has already chosen to view. It also tells the companion not to redirect the visitor, rank works or attribute feelings to them (supplementary material). The instruction constrains the companion but does not make the recording a clean trace of attention (Section~\ref{sec:f-omissions}). Visitors also capture moments they want to keep as screenshots of the companion's camera view, which lets them remain in the conversation. The study uses these screenshots unchanged as the photo album."#
+        let base = prefix + oldParagraph + "\n"
+        let revised = prefix + firstSentence + "\n" + secondSentence + "\n"
+        let file = directory.appendingPathComponent("split.txt")
+        try base.write(to: file, atomically: true, encoding: .utf8)
+        try runGitForUITest(["add", "."], in: directory)
+        try runGitForUITest(["commit", "-qm", "initial"], in: directory)
+        try revised.write(to: file, atomically: true, encoding: .utf8)
+        let editor = EditorViewController()
+        let window = NSWindow(contentViewController: editor)
+        defer { window.orderOut(nil) }
+        window.setContentSize(NSSize(width: 600, height: 700))
+        XCTAssertTrue(try editor.open(file: file, relativePath: "split.txt", repository: Repository(rootURL: directory), onSaved: {}))
+        editor.view.layoutSubtreeIfNeeded()
+        let texts = descendants(of: editor.view, matching: LineHighlightTextView.self)
+        let current = try XCTUnwrap(texts.first(where: \.isEditable))
+        let past = try XCTUnwrap(texts.first(where: { !$0.isEditable }))
+        let viewport = try XCTUnwrap(past.enclosingScrollView?.contentView)
+        let layout = try XCTUnwrap(past.layoutManager)
+        let container = try XCTUnwrap(past.textContainer)
+        // Visit the continuation first, then return to column zero of line 49.
+        for (sentence, expectedColumn) in [(secondSentence, (oldParagraph as NSString).range(of: "The visitor tours").location), (firstSentence, 0)] {
+            current.setSelectedRange(NSRange(location: (revised as NSString).range(of: sentence).location, length: 0))
+            editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+            let marker = try XCTUnwrap(past.caretMarker)
+            XCTAssertEqual(marker.column, expectedColumn)
+            let start = (past.string as NSString).lineStartOffset(forLineIndex: marker.line)
+            XCTAssertTrue((past.string as NSString).substring(from: start).hasPrefix("Everything Keepsake builds"))
+            let glyph = layout.glyphIndexForCharacter(at: start + expectedColumn)
+            let rect = layout.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+            XCTAssertEqual(rect.midY + past.textContainerOrigin.y, viewport.bounds.midY, accuracy: 1)
+        }
     }
 
     func testPastPaneFollowsCaretWithinAWrappedParagraph() throws {

@@ -1456,7 +1456,21 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         guard let layout = committedTextView.layoutManager else { return }
         let text = committedTextView.string as NSString
         layout.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: text.length))
-        let offset = textView.selectedRange().location
+        let currentText = textView.string as NSString
+        let selection = textView.selectedRange()
+        var offset = selection.location
+        // The insertion point just before whitespace still belongs to the
+        // preceding word. Probe that character without moving the real caret.
+        if selection.length == 0, offset > 0, offset <= currentText.length {
+            let previous = currentText.rangeOfComposedCharacterSequence(at: offset - 1)
+            let beforeWhitespace = offset == currentText.length ||
+                currentText.substring(with: currentText.rangeOfComposedCharacterSequence(at: offset))
+                    .rangeOfCharacter(from: .whitespacesAndNewlines) != nil
+            if beforeWhitespace,
+               currentText.substring(with: previous).rangeOfCharacter(from: .whitespacesAndNewlines) == nil {
+                offset = previous.location
+            }
+        }
         let insertedSegment = lastDiff.insertedWordRanges.first(where: { NSLocationInRange(offset, $0) })
         let replacementLink = lastDiff.replacementLinks.first(where: { NSLocationInRange(offset, $0.current) })
             ?? insertedSegment.flatMap { segment in
@@ -1480,7 +1494,12 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         // Pure insertions have no corresponding old word to emphasize.
         guard !lastDiff.insertedWordRanges.contains(where: { NSLocationInRange(offset, $0) }),
               let marker = committedTextView.caretMarker else { return }
-        let location = text.lineStartOffset(forLineIndex: marker.line) + marker.column
+        let currentLine = currentText.lineIndex(containing: offset)
+        let currentColumn = offset - currentText.lineStartOffset(forLineIndex: currentLine)
+        let column = offset == selection.location ? marker.column : mappedBaseColumn(
+            currentLine: currentLine, currentColumn: currentColumn, defaultColumn: currentColumn
+        )
+        let location = text.lineStartOffset(forLineIndex: marker.line) + column
         guard location < text.length else { return }
         let range = committedTextView.selectionRange(forProposedRange: NSRange(location: location, length: 0), granularity: .selectByWord)
         guard NSMaxRange(range) <= text.length,
@@ -1545,10 +1564,10 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     }
 
     private func mappedBaseColumn(currentLine: Int, currentColumn: Int, defaultColumn: Int) -> Int {
-        if currentColumn == 0 { return 0 }
         if let exact = lastDiff.currentToBaseColumn[LineColumn(line: currentLine, column: currentColumn)] {
             return exact
         }
+        if currentColumn == 0 { return 0 }
         var best: (distance: Int, currentColumn: Int, baseColumn: Int)?
         for (key, baseColumn) in lastDiff.currentToBaseColumn where key.line == currentLine {
             let distance = abs(key.column - currentColumn)
