@@ -98,6 +98,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AppCommands {
         activeMainController?.quickOpen(sender)
     }
 
+    func previousChangedFile(_ sender: Any?) { activeMainController?.previousChangedFile(sender) }
+    func nextChangedFile(_ sender: Any?) { activeMainController?.nextChangedFile(sender) }
+
     func previousParagraph(_ sender: Any?) {
         activeMainController?.previousParagraph(sender)
     }
@@ -200,9 +203,6 @@ enum MainMenu {
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editMenu.addItem(.separator())
-        let quickOpenItem = editMenu.addItem(withTitle: "Quick Open...", action: #selector(AppCommands.quickOpen(_:)), keyEquivalent: "t")
-        quickOpenItem.target = appDelegate
 
         editMenu.addItem(.separator())
         for (title, action, key, modifiers) in [
@@ -237,15 +237,24 @@ enum MainMenu {
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.zoom(_:)), keyEquivalent: "")
         let navigateItem = NSMenuItem()
-        mainMenu.addItem(navigateItem)
-        let navigateMenu = NSMenu(title: "Navigate")
+        mainMenu.insertItem(navigateItem, at: mainMenu.index(of: windowItem))
+        let navigateMenu = NSMenu(title: "Go")
         navigateItem.submenu = navigateMenu
-        let previousChange = navigateMenu.addItem(withTitle: "Previous Change", action: #selector(AppCommands.previousChange(_:)), keyEquivalent: ",")
-        previousChange.keyEquivalentModifierMask = [.command, .shift]
+        let quickOpenItem = navigateMenu.addItem(withTitle: "Quick Open…", action: #selector(AppCommands.quickOpen(_:)), keyEquivalent: "t")
+        quickOpenItem.target = appDelegate
+        navigateMenu.addItem(.separator())
+        let previousChange = navigateMenu.addItem(withTitle: "Previous Change", action: #selector(AppCommands.previousChange(_:)), keyEquivalent: "[")
+        previousChange.keyEquivalentModifierMask = [.command]
         previousChange.target = appDelegate
-        let nextChange = navigateMenu.addItem(withTitle: "Next Change", action: #selector(AppCommands.nextChange(_:)), keyEquivalent: ".")
-        nextChange.keyEquivalentModifierMask = [.command, .shift]
+        let nextChange = navigateMenu.addItem(withTitle: "Next Change", action: #selector(AppCommands.nextChange(_:)), keyEquivalent: "]")
+        nextChange.keyEquivalentModifierMask = [.command]
         nextChange.target = appDelegate
+        let previousFile = navigateMenu.addItem(withTitle: "Previous Changed File", action: #selector(AppCommands.previousChangedFile(_:)), keyEquivalent: "[")
+        previousFile.keyEquivalentModifierMask = [.command, .option]
+        previousFile.target = appDelegate
+        let nextFile = navigateMenu.addItem(withTitle: "Next Changed File", action: #selector(AppCommands.nextChangedFile(_:)), keyEquivalent: "]")
+        nextFile.keyEquivalentModifierMask = [.command, .option]
+        nextFile.target = appDelegate
         navigateMenu.addItem(.separator())
         let previousParagraph = navigateMenu.addItem(withTitle: "Previous Paragraph", action: #selector(AppCommands.previousParagraph(_:)), keyEquivalent: "\u{F700}")
         previousParagraph.keyEquivalentModifierMask = [.option]
@@ -285,6 +294,8 @@ enum MainMenu {
     func increaseFontSize(_ sender: Any?)
     func decreaseFontSize(_ sender: Any?)
     func quickOpen(_ sender: Any?)
+    func previousChangedFile(_ sender: Any?)
+    func nextChangedFile(_ sender: Any?)
     func previousParagraph(_ sender: Any?)
     func nextParagraph(_ sender: Any?)
     func previousChange(_ sender: Any?)
@@ -444,6 +455,16 @@ final class MainViewController: NSSplitViewController, AppCommands {
         } else {
             controller.showWindow(nil)
         }
+    }
+
+    func previousChangedFile(_ sender: Any?) {
+        guard !isCommitting else { return }
+        navigateChange(.previous, skipCurrentFile: true)
+    }
+
+    func nextChangedFile(_ sender: Any?) {
+        guard !isCommitting else { return }
+        navigateChange(.next, skipCurrentFile: true)
     }
 
     func previousParagraph(_ sender: Any?) {
@@ -612,29 +633,34 @@ final class MainViewController: NSSplitViewController, AppCommands {
         return true
     }
 
-    private func navigateChange(_ direction: ChangeNavigationDirection) {
+    private func navigateChange(_ direction: ChangeNavigationDirection, skipCurrentFile: Bool = false) {
         guard let repository else { return }
         invalidateActivationRefresh()
-        if editor.navigateToAdjacentChange(direction, animated: true) {
+        if !skipCurrentFile, editor.navigateToAdjacentChange(direction, animated: true) {
             return
         }
 
-        repository.refreshStatus()
-        sidebar.setCurrentBranchName(repository.currentBranchName)
-        let changedPaths = repository.unstagedPaths
-            .union(editor.changedDocumentPaths)
-        let changedFiles = repository.makeTree().filesInDisplayOrder.filter {
-            changedPaths.contains($0.relativePath)
-        }
+        let generation = activationRefreshGeneration
         let previousPath = editor.currentDocumentPath
-        guard let targetPath = ChangedFileNavigator.adjacentPath(
-            in: changedFiles.map(\.relativePath),
-            from: previousPath,
-            direction: direction
-        ), let targetFile = changedFiles.first(where: { $0.relativePath == targetPath }) else { return }
-
-        _ = openFile(relativePath: targetPath, url: targetFile.url) { [weak self] in
-            _ = self?.editor.navigateToEdgeChange(direction, animated: targetPath == previousPath)
+        let bufferedPaths = editor.changedDocumentPaths
+        activationRefreshQueue.async { [weak self] in
+            let snapshot = repository.statusSnapshot()
+            let changedPaths = snapshot.unstagedPaths.union(bufferedPaths)
+            let changedFiles = snapshot.tree.filesInDisplayOrder.filter { changedPaths.contains($0.relativePath) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.repository === repository,
+                      self.activationRefreshGeneration == generation,
+                      !self.isCommitting else { return }
+                repository.apply(snapshot)
+                self.sidebar.setCurrentBranchName(snapshot.branchName)
+                guard let targetPath = ChangedFileNavigator.adjacentPath(
+                    in: changedFiles.map(\.relativePath), from: previousPath, direction: direction
+                ), let target = changedFiles.first(where: { $0.relativePath == targetPath }),
+                   !skipCurrentFile || targetPath != previousPath else { return }
+                _ = self.openFile(relativePath: targetPath, url: target.url) { [weak self] in
+                    _ = self?.editor.navigateToEdgeChange(direction, animated: targetPath == previousPath)
+                }
+            }
         }
     }
 

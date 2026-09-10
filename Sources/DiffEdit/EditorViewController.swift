@@ -127,6 +127,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         committedTextView.font = editorFont()
         committedTextView.insertionPointColor = DiffPalette.insertionPoint
         committedTextView.frame = NSRect(origin: .zero, size: NSSize(width: 600, height: 106))
+        committedTextView.showsCaretMarker = false
         committedTextView.autoresizingMask = [.width]
         committedTextView.textContainer?.widthTracksTextView = true
         committedTextView.textContainer?.containerSize = NSSize(width: 600, height: CGFloat.greatestFiniteMagnitude)
@@ -1423,6 +1424,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
             committedTextView.caretMarker = nil
         }
         guard needsRebuild else {
+            emphasizePastText()
             centerCommittedCaret()
             return
         }
@@ -1446,7 +1448,34 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         }
         committedTextView.textStorage?.setAttributedString(attributed)
         committedGutter?.needsDisplay = true
+        emphasizePastText()
         centerCommittedCaret()
+    }
+
+    private func emphasizePastText() {
+        guard let layout = committedTextView.layoutManager else { return }
+        let text = committedTextView.string as NSString
+        layout.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: text.length))
+        let offset = textView.selectedRange().location
+        if let link = lastDiff.replacementLinks.first(where: { NSLocationInRange(offset, $0.current) }),
+           let line = committedVisibleBaseLines.firstIndex(where: { $0 == link.base.line }) {
+            let start = text.lineStartOffset(forLineIndex: line)
+            let range = NSRange(location: start + link.base.range.location, length: link.base.range.length)
+            if NSMaxRange(range) <= text.length {
+                layout.addTemporaryAttribute(.backgroundColor, value: DiffPalette.activeDeletedText, forCharacterRange: range)
+                committedTextView.caretMarker = CaretMarker(line: line, column: link.base.range.location)
+            }
+            return
+        }
+        // Pure insertions have no corresponding old word to emphasize.
+        guard !lastDiff.insertedWordRanges.contains(where: { NSLocationInRange(offset, $0) }),
+              let marker = committedTextView.caretMarker else { return }
+        let location = text.lineStartOffset(forLineIndex: marker.line) + marker.column
+        guard location < text.length else { return }
+        let range = committedTextView.selectionRange(forProposedRange: NSRange(location: location, length: 0), granularity: .selectByWord)
+        guard NSMaxRange(range) <= text.length,
+              !text.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        layout.addTemporaryAttribute(.backgroundColor, value: DiffPalette.correspondingWord, forCharacterRange: range)
     }
 
     private func committedContextRadius() -> Int {

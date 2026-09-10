@@ -65,6 +65,7 @@ final class LineHighlightTextView: NSTextView {
     var shortcutHandler: ((EditorShortcut) -> Void)?
     var contextMenuProvider: ((Int) -> NSMenu?)?
     var clipboardWriter: ((String) -> Void)?
+    var showsCaretMarker = true
     var caretMarker: CaretMarker? {
         didSet {
             needsDisplay = true
@@ -347,7 +348,7 @@ final class LineHighlightTextView: NSTextView {
     }
 
     private func drawCaretMarker(in dirtyRect: NSRect) {
-        guard let caretMarker,
+        guard showsCaretMarker, let caretMarker,
               let layoutManager,
               let textContainer else { return }
         let nsString = string as NSString

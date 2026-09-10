@@ -57,7 +57,8 @@ contains staged files outside the opened folder.
 | Save current file | <kbd>⌘S</kbd> |
 | Find / replace | <kbd>⌘F</kbd> / <kbd>⌥⌘F</kbd> |
 | Next / previous match | <kbd>⌘G</kbd> / <kbd>⇧⌘G</kbd> |
-| Previous / next change | <kbd>⇧⌘,</kbd> / <kbd>⇧⌘.</kbd> |
+| Previous / next change | <kbd>⌘[</kbd> / <kbd>⌘]</kbd> |
+| Previous / next changed file | <kbd>⌥⌘[</kbd> / <kbd>⌥⌘]</kbd> |
 | Previous / next paragraph | <kbd>⌥↑</kbd> / <kbd>⌥↓</kbd> |
 | Toggle word wrapping | <kbd>⌥⌘W</kbd> |
 | Increase / decrease type size | <kbd>⌘+</kbd> / <kbd>⌘−</kbd> |

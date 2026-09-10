@@ -8,6 +8,7 @@ struct DiffResult {
     var currentDeletionMarkers: [DeletionMarker]
     var currentToBaseLine: [Int: Int]
     var currentToBaseColumn: [LineColumn: Int]
+    var replacementLinks: [(current: NSRange, base: LineRange)] = []
     var revertActions: [RevertAction]
 
     static let empty = DiffResult(currentTouchedLines: [], baseTouchedLines: [], insertedWordRanges: [], deletedWordRanges: [], currentDeletionMarkers: [], currentToBaseLine: [:], currentToBaseColumn: [:], revertActions: [])
@@ -51,6 +52,7 @@ struct DiffResult {
         }
         // Character mappings and revert ranges belong to the old snapshot.
         currentToBaseColumn.removeAll()
+        replacementLinks.removeAll()
         revertActions.removeAll()
     }
 
@@ -373,6 +375,15 @@ enum DiffEngine {
             for item in pendingInserts {
                 result.currentTouchedLines.insert(item.0)
             }
+            if pendingDeletes.count != pendingInserts.count,
+               let firstInsertion = pendingInserts.first,
+               applyWhitespaceReflow(old: pendingDeletes, new: pendingInserts,
+                                     currentStart: (current as NSString).lineStartOffset(forLineIndex: firstInsertion.0),
+                                     result: &result) {
+                pendingDeletes.removeAll()
+                pendingInserts.removeAll()
+                return
+            }
             let isPureLineDeletion = !pendingDeletes.isEmpty && pendingInserts.isEmpty
             var addedBoundaryDeletionMarker = false
             let boundaryDeletionMarker: DeletionMarker? = {
@@ -412,6 +423,9 @@ enum DiffEngine {
                     let wordDiff = wordDiff(old: deletion.1, new: insertion.1)
                     result.deletedWordRanges += wordDiff.deleted.map { LineRange(line: deletion.0, range: $0) }
                     let lineStart = (current as NSString).lineStartOffset(forLineIndex: insertion.0)
+                    result.replacementLinks += wordDiff.replacements.map { pair in
+                        (NSRange(location: lineStart + pair.new.location, length: pair.new.length), LineRange(line: deletion.0, range: pair.old))
+                    }
                     let insertedRanges = wordDiff.inserted.map { NSRange(location: lineStart + $0.location, length: $0.length) }
                     result.insertedWordRanges += insertedRanges
                     for insertedRange in insertedRanges {
@@ -469,6 +483,64 @@ enum DiffEngine {
         flushChangedBlock()
         result.currentDeletionMarkers = coalescedDeletionMarkers(result.currentDeletionMarkers, lines: currentLines)
         return result
+    }
+
+    // A sentence split is one text edit across multiple logical lines, not a
+    // deleted sentence plus an inserted sentence. Preserve matching text and
+    // record only the whitespace edits for reverting.
+    private static func applyWhitespaceReflow(
+        old: [(Int, String)], new: [(Int, String)], currentStart: Int, result: inout DiffResult
+    ) -> Bool {
+        guard let firstOld = old.first, let firstNew = new.first else { return false }
+        let oldText = old.map { $0.1 }.joined() as NSString
+        let newText = new.map { $0.1 }.joined() as NSString
+        func contentTokens(_ text: NSString) -> [(text: String, range: NSRange)] {
+            tokenize(text as String).filter {
+                $0.text.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted) != nil
+            }
+        }
+        let oldTokens = contentTokens(oldText)
+        let newTokens = contentTokens(newText)
+        guard !oldTokens.isEmpty, oldTokens.map(\.text) == newTokens.map(\.text) else { return false }
+        var oldEnd = 0
+        var newEnd = 0
+        func recordGap(oldLimit: Int, newLimit: Int) {
+            let oldGap = oldText.substring(with: NSRange(location: oldEnd, length: oldLimit - oldEnd))
+            let newRange = NSRange(location: newEnd, length: newLimit - newEnd)
+            let newGap = newText.substring(with: newRange)
+            guard oldGap != newGap else { return }
+            result.revertActions.append(RevertAction(
+                currentRange: NSRange(location: currentStart + newEnd, length: newRange.length), replacement: oldGap
+            ))
+            if !oldGap.isEmpty, newGap.isEmpty {
+                let line = newText.lineIndex(containing: newEnd)
+                result.currentDeletionMarkers.append(DeletionMarker(
+                    line: firstNew.0 + line, column: newEnd - newText.lineStartOffset(forLineIndex: line)
+                ))
+            }
+        }
+        for (oldToken, newToken) in zip(oldTokens, newTokens) {
+            recordGap(oldLimit: oldToken.range.location, newLimit: newToken.range.location)
+            let oldLine = oldText.lineIndex(containing: oldToken.range.location)
+            let newLine = newText.lineIndex(containing: newToken.range.location)
+            let globalNewLine = firstNew.0 + newLine
+            let globalOldLine = firstOld.0 + oldLine
+            // A joined line can span several old lines; retain its first anchor.
+            if result.currentToBaseLine[globalNewLine] == nil {
+                result.currentToBaseLine[globalNewLine] = globalOldLine
+            }
+            if result.currentToBaseLine[globalNewLine] == globalOldLine {
+                let oldColumn = oldToken.range.location - oldText.lineStartOffset(forLineIndex: oldLine)
+                let newColumn = newToken.range.location - newText.lineStartOffset(forLineIndex: newLine)
+                for offset in 0...newToken.range.length {
+                    result.currentToBaseColumn[LineColumn(line: globalNewLine, column: newColumn + offset)] = oldColumn + offset
+                }
+            }
+            oldEnd = NSMaxRange(oldToken.range)
+            newEnd = NSMaxRange(newToken.range)
+        }
+        recordGap(oldLimit: oldText.length, newLimit: newText.length)
+        return true
     }
 
     private static func coalescedDeletionMarkers(_ markers: [DeletionMarker], lines: [String]) -> [DeletionMarker] {
@@ -562,7 +634,7 @@ enum DiffEngine {
         return result
     }
 
-    private static func wordDiff(old: String, new: String) -> (deleted: [NSRange], inserted: [NSRange], deletionMarkerColumns: [Int], currentToBaseColumn: [Int: Int]) {
+    private static func wordDiff(old: String, new: String) -> (deleted: [NSRange], inserted: [NSRange], deletionMarkerColumns: [Int], currentToBaseColumn: [Int: Int], replacements: [(old: NSRange, new: NSRange)]) {
         let oldTokens = tokenize(old)
         let newTokens = tokenize(new)
         let oldKeys = contextualDiffKeys(for: oldTokens)
@@ -585,6 +657,7 @@ enum DiffEngine {
         var inserted: [NSRange] = []
         var markerColumns: [Int] = []
         var columnMap: [Int: Int] = [:]
+        var replacements: [(old: NSRange, new: NSRange)] = []
         var oldIndex = 0
         var newIndex = 0
         var pendingDeletedRanges: [NSRange] = []
@@ -594,6 +667,11 @@ enum DiffEngine {
             guard !pendingDeletedRanges.isEmpty || !pendingInsertedRanges.isEmpty else { return }
             deleted += pendingDeletedRanges
             inserted += pendingInsertedRanges
+            if let oldFirst = pendingDeletedRanges.first, let oldLast = pendingDeletedRanges.last,
+               let newFirst = pendingInsertedRanges.first, let newLast = pendingInsertedRanges.last {
+                replacements.append((NSRange(location: oldFirst.location, length: NSMaxRange(oldLast) - oldFirst.location),
+                                     NSRange(location: newFirst.location, length: NSMaxRange(newLast) - newFirst.location)))
+            }
             if !pendingDeletedRanges.isEmpty, pendingInsertedRanges.isEmpty {
                 if newIndex < newTokens.count {
                     markerColumns.append(newTokens[newIndex].range.location)
@@ -646,7 +724,8 @@ enum DiffEngine {
             normalizedHighlightRanges(ranges: deleted, in: old),
             normalizedInsertedRanges,
             pureDeletionMarkerColumns,
-            columnMap
+            columnMap,
+            replacements
         )
     }
 
@@ -878,15 +957,29 @@ enum DiffEngine {
 
         // Swift's CollectionDifference avoids the quadratic m×n table that
         // previously made ordinary large source files consume hundreds of MB.
-        let difference = new.difference(from: old)
+        // Anchor identical edges before aligning the interior. Repeated words
+        // such as "and" inside a rewrite must not steal matches from the
+        // unchanged sentence tail and leave spurious deletions there.
+        var prefix = 0
+        while prefix < min(old.count, new.count), old[prefix] == new[prefix] {
+            prefix += 1
+        }
+        var suffix = 0
+        while suffix < min(old.count, new.count) - prefix,
+              old[old.count - 1 - suffix] == new[new.count - 1 - suffix] {
+            suffix += 1
+        }
+        let oldInterior = Array(old[prefix..<(old.count - suffix)])
+        let newInterior = Array(new[prefix..<(new.count - suffix)])
+        let difference = newInterior.difference(from: oldInterior)
         var removedOffsets = Set<Int>()
         var insertedOffsets = Set<Int>()
         for change in difference {
             switch change {
             case let .remove(offset, _, _):
-                removedOffsets.insert(offset)
+                removedOffsets.insert(prefix + offset)
             case let .insert(offset, _, _):
-                insertedOffsets.insert(offset)
+                insertedOffsets.insert(prefix + offset)
             }
         }
 

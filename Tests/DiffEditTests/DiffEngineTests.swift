@@ -81,6 +81,36 @@ final class DiffEngineTests: XCTestCase {
         XCTAssertEqual(applying(result.revertActions[0], to: current), base)
     }
 
+    func testRepeatedConjunctionDoesNotMoveDeletionIntoUnchangedSuffix() {
+        let original = #"  \item \textbf{Immersive, and made only of the visitor's material.} Walking into a reconstruction of one's own record heightens the sense of being back~\cite{danry2025}, so the space is entered rather than scrolled. Everything in it is generated from the visitor's frames and words, and no text panel or transcript stands between the visitor and their memory (Sections~\ref{sec:capture} and~\ref{sec:experience})."#
+        let revised = #"  \item \textbf{Immersive and grounded in the visit record.} Walking into a reconstruction of one's own record heightens the sense of being back~\cite{danry2025}, so the space is entered rather than scrolled. Everything in it derives from the recorded visit and the visitor's review, and no text panel or transcript stands between the visitor and their memory (Sections~\ref{sec:capture} and~\ref{sec:experience})."#
+        for (base, current) in [(original, revised), (revised, original)] {
+            let result = DiffEngine.diff(base: base, current: current)
+            let suffix = (current as NSString).range(of: ", and no text panel")
+            XCTAssertFalse(result.currentDeletionMarkers.contains { $0.column > suffix.location },
+                           "Markers: \(result.currentDeletionMarkers)")
+            XCTAssertFalse(result.insertedWordRanges.contains { NSIntersectionRange($0, NSRange(location: suffix.location, length: (current as NSString).length - suffix.location)).length > 0 })
+        }
+    }
+
+    func testSentenceLineBreakDoesNotHighlightUnchangedWords() {
+        let base = "A short sentence. The following sentence is considerably longer and should remain unchanged.\n"
+        for separator in ["\n", "\n ", "\r\n"] {
+            let current = base.replacingOccurrences(of: ". The", with: "." + separator + "The")
+            let result = DiffEngine.diff(base: base, current: current)
+            XCTAssertTrue(result.deletedWordRanges.isEmpty)
+            XCTAssertTrue(result.insertedWordRanges.isEmpty)
+            XCTAssertTrue(result.currentDeletionMarkers.isEmpty)
+            XCTAssertEqual(result.currentToBaseLine[1], 0)
+            XCTAssertEqual(result.currentToBaseColumn[LineColumn(line: 1, column: separator.hasSuffix(" ") ? 1 : 0)], 18)
+            var restored = current
+            for action in result.revertActions.sorted(by: { $0.currentRange.location > $1.currentRange.location }) {
+                restored = applying(action, to: restored)
+            }
+            XCTAssertEqual(restored, base)
+        }
+    }
+
     func testPureMidLineDeletionAddsAnInlineMarker() {
         let result = DiffEngine.diff(
             base: "alpha removed beta\n",
@@ -789,6 +819,45 @@ final class TextSelectionSnapshotTests: XCTestCase {
 }
 
 final class WorkspaceModeUITests: XCTestCase {
+    func testPastPaneEmphasizesReplacementAsAStableUnit() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runGitForUITest(["init", "-q"], in: directory)
+        try runGitForUITest(["config", "user.name", "DiffEdit Tests"], in: directory)
+        try runGitForUITest(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        let file = directory.appendingPathComponent("replacement.txt")
+        try "alpha old omega\n".write(to: file, atomically: true, encoding: .utf8)
+        try runGitForUITest(["add", "."], in: directory)
+        try runGitForUITest(["commit", "-qm", "initial"], in: directory)
+        try "alpha extraordinary omega\n".write(to: file, atomically: true, encoding: .utf8)
+        let editor = EditorViewController()
+        let window = NSWindow(contentViewController: editor)
+        defer { window.orderOut(nil) }
+        window.setContentSize(NSSize(width: 600, height: 700))
+        XCTAssertTrue(try editor.open(file: file, relativePath: "replacement.txt", repository: Repository(rootURL: directory), onSaved: {}))
+        let texts = descendants(of: editor.view, matching: LineHighlightTextView.self)
+        let current = try XCTUnwrap(texts.first(where: \.isEditable))
+        let past = try XCTUnwrap(texts.first(where: { !$0.isEditable }))
+        let layout = try XCTUnwrap(past.layoutManager)
+        XCTAssertFalse(past.showsCaretMarker)
+        let oldRange = (past.string as NSString).range(of: "old")
+        for offset in 6..<19 {
+            current.setSelectedRange(NSRange(location: offset, length: 0))
+            editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+            var effective = NSRange()
+            let color = layout.temporaryAttribute(.backgroundColor, atCharacterIndex: oldRange.location, effectiveRange: &effective) as? NSColor
+            XCTAssertEqual(color, DiffPalette.activeDeletedText)
+            XCTAssertEqual(effective, oldRange)
+            XCTAssertEqual(past.caretMarker?.column, 6)
+        }
+        current.setSelectedRange(NSRange(location: 2, length: 0))
+        editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+        XCTAssertNil(layout.temporaryAttribute(.backgroundColor, atCharacterIndex: oldRange.location, effectiveRange: nil))
+        let unchanged = (past.string as NSString).range(of: "alpha")
+        XCTAssertEqual(layout.temporaryAttribute(.backgroundColor, atCharacterIndex: unchanged.location, effectiveRange: nil) as? NSColor, DiffPalette.correspondingWord)
+    }
+
     func testPastPaneFollowsCaretWithinAWrappedParagraph() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
