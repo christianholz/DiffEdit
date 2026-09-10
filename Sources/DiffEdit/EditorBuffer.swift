@@ -5,6 +5,8 @@ struct ForegroundFileRefreshRequest {
     let relativePath: String
     let url: URL
     let knownDiskModificationDate: Date?
+    let knownDiskText: String?
+    let knownCommittedText: String
 }
 
 struct PreparedForegroundFileRefresh {
@@ -18,13 +20,17 @@ struct PreparedForegroundFileRefresh {
         repository: Repository
     ) throws -> PreparedForegroundFileRefresh? {
         let observedModificationDate = try DiskFileReader.modificationDate(at: request.url)
-        guard observedModificationDate != request.knownDiskModificationDate else { return nil }
-        let observedDisk = try DiskFileReader.snapshot(at: request.url)
+        let committedText = repository.committedText(relativePath: request.relativePath) ?? ""
+        let diskChanged = observedModificationDate != request.knownDiskModificationDate
+        guard diskChanged || committedText != request.knownCommittedText else { return nil }
+        let observedDisk = try diskChanged
+            ? DiskFileReader.snapshot(at: request.url)
+            : DiskFileSnapshot(text: request.knownDiskText, modificationDate: observedModificationDate)
         return PreparedForegroundFileRefresh(
             request: request,
             diskText: observedDisk.text,
             diskModificationDate: observedDisk.modificationDate,
-            committedText: repository.committedText(relativePath: request.relativePath) ?? ""
+            committedText: committedText
         )
     }
 }

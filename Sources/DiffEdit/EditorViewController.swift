@@ -73,6 +73,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     private var stagingGeneration = 0
     private let typingDiffQueue = DispatchQueue(label: "com.diffedit.typing-diff", qos: .userInitiated)
     private var pendingDiffWorkItem: DispatchWorkItem?
+    private var pendingImmediateHighlightRange: NSRange?
     private var fontSize: CGFloat = 13
     private var wordWrap = true
     private var lastDiff = DiffResult.empty
@@ -151,6 +152,14 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         }
         textView.contextMenuProvider = { [weak self] index in
             self?.contextMenu(at: index)
+        }
+        textView.onBecomeFirstResponder = { [weak self] in
+            guard let self else { return }
+            let selection = self.committedTextView.selectedRange()
+            guard selection.length > 0 else { return }
+            let location = min(selection.location, (self.committedTextView.string as NSString).length)
+            self.committedTextView.setSelectedRange(NSRange(location: location, length: 0))
+            self.updateCommittedContext()
         }
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -689,7 +698,9 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         return ForegroundFileRefreshRequest(
             relativePath: currentRelativePath,
             url: buffer.url,
-            knownDiskModificationDate: buffer.knownDiskModificationDate
+            knownDiskModificationDate: buffer.knownDiskModificationDate,
+            knownDiskText: buffer.knownDiskText,
+            knownCommittedText: buffer.baseText
         )
     }
 
@@ -927,6 +938,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
 
     func textDidChange(_ notification: Notification) {
         guard !isApplyingHighlights else { return }
+        applyImmediateHighlightsAroundEdit()
         updateTypingAttributesForSelection()
         updateActiveLineHighlight()
         persistCurrentBuffer()
@@ -963,10 +975,44 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
 
     func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
         guard textView === self.textView else { return true }
+        pendingImmediateHighlightRange = NSRange(
+            location: affectedCharRange.location,
+            length: ((replacementString ?? "") as NSString).length
+        )
         lastDiff.adjustDecorations(for: affectedCharRange, replacement: replacementString ?? "", in: textView.string as NSString)
         self.textView.deletionMarkers = lastDiff.currentDeletionMarkers
         self.textView.fullLineHighlightedLines = lastDiff.currentTouchedLines
         return true
+    }
+
+    // Keep the edited logical line visually current while the complete diff is
+    // debounced and calculated off the UI thread. This compares only the few
+    // affected lines, so typing does not pay for a document-wide diff.
+    private func applyImmediateHighlightsAroundEdit() {
+        guard let edit = pendingImmediateHighlightRange,
+              let storage = textView.textStorage else { return }
+        pendingImmediateHighlightRange = nil
+        let current = textView.string as NSString
+        let startLine = current.lineIndex(containing: min(edit.location, current.length))
+        let endLine = current.lineIndex(containing: min(NSMaxRange(edit), current.length))
+        isApplyingHighlights = true
+        storage.beginEditing()
+        for currentLine in startLine...max(startLine, endLine) {
+            let currentRange = current.lineRange(forLineIndex: currentLine)
+            guard currentRange.location != NSNotFound else { continue }
+            let baseLine = lastDiff.currentToBaseLine[currentLine] ?? currentLine
+            let oldText = cachedBaseLines[safe: baseLine] ?? ""
+            let newText = current.substring(with: currentRange)
+            let lineDiff = DiffEngine.diff(base: oldText, current: newText)
+            storage.removeAttribute(.backgroundColor, range: currentRange)
+            for localRange in lineDiff.insertedWordRanges {
+                let range = NSRange(location: currentRange.location + localRange.location, length: localRange.length)
+                guard NSMaxRange(range) <= storage.length else { continue }
+                storage.addAttribute(.backgroundColor, value: DiffPalette.insertedText, range: range)
+            }
+        }
+        storage.endEditing()
+        isApplyingHighlights = false
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {

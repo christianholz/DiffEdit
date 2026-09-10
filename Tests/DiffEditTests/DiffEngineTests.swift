@@ -144,6 +144,22 @@ final class DiffEngineTests: XCTestCase {
                 XCTAssertFalse(result.insertedWordRanges.contains { NSIntersectionRange($0, newRange).length > 0 }, separator)
             }
         }
+        let boundaryEdits = [
+            ("or the album did, and", "or album, and", ", and"),
+            ("before removable; after", "before; after", "; after"),
+            ("before removable) after", "before) after", ") after"),
+            ("before removable] after", "before] after", "] after"),
+            ("before removable} after", "before} after", "} after"),
+            ("before, after", "before newly added, after", ", after"),
+            ("first, or the album did, and", "first, or album, and", ", and")
+        ]
+        for (base, current, unchanged) in boundaryEdits {
+            let oldRange = (base as NSString).range(of: unchanged, options: .backwards)
+            let newRange = (current as NSString).range(of: unchanged, options: .backwards)
+            let result = DiffEngine.diff(base: base, current: current)
+            XCTAssertFalse(result.deletedWordRanges.contains { NSIntersectionRange($0.range, oldRange).length > 0 }, base)
+            XCTAssertFalse(result.insertedWordRanges.contains { NSIntersectionRange($0, newRange).length > 0 }, current)
+        }
         let base = "alpha old, shared tail"
         let current = "alpha revised; shared ending"
         let result = DiffEngine.diff(base: base, current: current)
@@ -168,6 +184,12 @@ final class DiffEngineTests: XCTestCase {
         let result = DiffEngine.diff(base: base, current: current)
         XCTAssertEqual(result.deletedWordRanges.map { (base as NSString).substring(with: $0.range) }, [";"])
         XCTAssertEqual(highlightedStrings(result.insertedWordRanges, in: current), ["."])
+
+        let deletedWord = DiffEngine.diff(base: "or the album did, and", current: "or album, and")
+        let oldComma = ("or the album did, and" as NSString).range(of: ",")
+        let comma = ("or album, and" as NSString).range(of: ",")
+        XCTAssertFalse(deletedWord.deletedWordRanges.contains { NSIntersectionRange($0.range, oldComma).length > 0 })
+        XCTAssertFalse(deletedWord.insertedWordRanges.contains { NSIntersectionRange($0, comma).length > 0 })
     }
 
     func testPureMidLineDeletionAddsAnInlineMarker() {
@@ -1004,6 +1026,20 @@ final class WorkspaceModeUITests: XCTestCase {
             }
         }
 
+        let currentFactual = (current.string as NSString).range(of: "factual")
+        let pastFactual = (past.string as NSString).range(of: "factual")
+        current.setSelectedRange(NSRange(location: currentFactual.location, length: 0))
+        editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
+        XCTAssertTrue(window.makeFirstResponder(past))
+        past.setSelectedRange(pastFactual)
+        XCTAssertEqual(past.selectedRange(), pastFactual)
+        XCTAssertTrue(window.makeFirstResponder(current))
+        XCTAssertEqual(past.selectedRange().length, 0)
+        XCTAssertEqual(
+            layout.temporaryAttribute(.backgroundColor, atCharacterIndex: pastFactual.location, effectiveRange: nil) as? NSColor,
+            DiffPalette.correspondingWord
+        )
+
     }
 
     func testSplitEditedParagraphKeepsPastPaneAtCorrespondingSentence() throws {
@@ -1127,6 +1163,10 @@ final class WorkspaceModeUITests: XCTestCase {
         let text = try XCTUnwrap(descendants(of: editor.view, matching: LineHighlightTextView.self).first(where: \.isEditable))
         XCTAssertEqual(text.deletionMarkers.first?.column, 5)
         text.insertText("X", replacementRange: NSRange(location: 0, length: 0))
+        XCTAssertEqual(
+            text.textStorage?.attribute(.backgroundColor, at: 0, effectiveRange: nil) as? NSColor,
+            DiffPalette.insertedText
+        )
         XCTAssertEqual(text.deletionMarkers.first?.column, 6)
         text.insertText("Y", replacementRange: NSRange(location: 11, length: 0))
         XCTAssertEqual(text.deletionMarkers.first?.column, 6)
@@ -1768,6 +1808,18 @@ final class WorkspaceModeUITests: XCTestCase {
         XCTAssertTrue(try editor.refreshCurrentFileFromDisk(using: Repository(rootURL: directory)))
         XCTAssertEqual(editableTextView.string, externalText)
         XCTAssertEqual(editableTextView.selectedRange(), NSRange(location: originalCaret, length: 0))
+
+        // Git can change while the file and its modification date stay fixed.
+        // A foreground refresh must still replace the cached base and diff.
+        try runGitForUITest(["init", "-q"], in: directory)
+        try runGitForUITest(["config", "user.name", "DiffEdit Tests"], in: directory)
+        try runGitForUITest(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        try runGitForUITest(["add", "."], in: directory)
+        try runGitForUITest(["commit", "-qm", "external commit"], in: directory)
+        try FileManager.default.setAttributes([.modificationDate: changedDate], ofItemAtPath: fileURL.path)
+        editor.captureForegroundState()
+        XCTAssertTrue(try editor.refreshCurrentFileFromDisk(using: Repository(rootURL: directory)))
+        XCTAssertNil(editableTextView.textStorage?.attribute(.backgroundColor, at: 0, effectiveRange: nil))
     }
 
     func testOnlyEditableViewHighlightsActiveLogicalLine() throws {

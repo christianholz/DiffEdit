@@ -13,6 +13,7 @@ final class EditorSplitView: NSSplitView {
 }
 
 final class LineHighlightTextView: NSTextView {
+    private static let inlineChangeMarkerWidth: CGFloat = 4
     private var typingUndoEnd: Int?
     private var typingUndoEndedWithSpace = false
 
@@ -61,10 +62,17 @@ final class LineHighlightTextView: NSTextView {
         return super.resignFirstResponder()
     }
 
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { onBecomeFirstResponder?() }
+        return accepted
+    }
+
     var lineNumberProvider: ((Int) -> String?)?
     var shortcutHandler: ((EditorShortcut) -> Void)?
     var contextMenuProvider: ((Int) -> NSMenu?)?
     var clipboardWriter: ((String) -> Void)?
+    var onBecomeFirstResponder: (() -> Void)?
     var showsCaretMarker = true
     var insertionCaretMarker: CaretMarker? { didSet { needsDisplay = true } }
     var caretMarker: CaretMarker? {
@@ -311,8 +319,8 @@ final class LineHighlightTextView: NSTextView {
             let clampedColumn = max(0, min(marker.column, lineRange.length))
             let characterLocation = min(lineRange.location + clampedColumn, nsString.length)
             guard var markerRect = markerRect(characterLocation: characterLocation, textOrigin: textOrigin, layoutManager: layoutManager, textContainer: textContainer) else { continue }
-            markerRect.origin.x -= 2
-            markerRect.size.width = 4
+            markerRect.origin.x -= Self.inlineChangeMarkerWidth / 2
+            markerRect.size.width = Self.inlineChangeMarkerWidth
             if markerRect.intersects(dirtyRect) {
                 markerRect.fill()
             }
@@ -357,8 +365,8 @@ final class LineHighlightTextView: NSTextView {
         let location = min(text.length, line.location + max(0, marker.column))
         guard var rect = markerRect(characterLocation: location, textOrigin: textContainerOrigin,
                                     layoutManager: layoutManager, textContainer: textContainer) else { return }
-        rect.origin.x -= 1
-        rect.size.width = 2
+        rect.origin.x -= Self.inlineChangeMarkerWidth / 2
+        rect.size.width = Self.inlineChangeMarkerWidth
         guard rect.intersects(dirtyRect) else { return }
         DiffPalette.insertionMarker.setFill()
         rect.fill()
