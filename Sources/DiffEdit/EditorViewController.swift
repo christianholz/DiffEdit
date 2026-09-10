@@ -19,7 +19,7 @@ enum WorkspaceMode: Int {
     case staging
 }
 
-final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitViewDelegate {
+final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitViewDelegate, NSTextFieldDelegate {
     static let committedPaneHeightDefaultsKey = "DiffEdit.committedPaneHeight"
 
     var onBufferedChangesChanged: ((Set<String>) -> Void)?
@@ -38,17 +38,41 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     private var mainGutter: LineNumberGutterView?
     private let changeOverview = ChangeOverviewView()
     private let stagingDiffView = StagingDiffView()
+    private let searchBar = NSStackView()
+    private let searchField = NSTextField()
+    private let replacementField = NSTextField()
+    private let replacementRow = NSStackView()
+    private let searchFeedback = NSTextField(labelWithString: "")
+    private var searchIsOpen = false
+
     private let statusBar = NSView()
     private let statusLabel = NSTextField(labelWithString: "Open a folder to begin.")
+    private let fileIOQueue = DispatchQueue(label: "com.diffedit.file-io", qos: .userInitiated)
+    private var openingGeneration = 0
+    private var savingPaths = Set<String>()
+    private var repeatSavePaths = Set<String>()
+    private var queuedSaveCompletions: [String: [(Result<Void, Error>) -> Void]] = [:]
+    var isSaving: Bool { !savingPaths.isEmpty }
+
     private var currentFileURL: URL?
     private var currentRelativePath: String?
     private var onSaved: (() -> Void)?
     private var buffersByPath: [String: EditorBuffer] = [:]
     private var stageSelectionsByPath: [String: StageSelection] = [:]
     private var lastReportedBufferedChanges = Set<String>()
-    private var baseText = ""
+    private var baseText = "" {
+        didSet {
+            cachedBaseLines = baseText.splitKeepingEmptyLines()
+            committedContextNeedsRefresh = true
+        }
+    }
+    private var cachedBaseLines: [String] = []
+    private var committedContextNeedsRefresh = true
+    private var diffGeneration = 0
+    private var preparedStagingPlan: (base: String, current: String, plan: SelectiveStagingPlan)?
+    private var stagingGeneration = 0
+    private let typingDiffQueue = DispatchQueue(label: "com.diffedit.typing-diff", qos: .userInitiated)
     private var pendingDiffWorkItem: DispatchWorkItem?
-    private var pendingLineStructureChange = false
     private var fontSize: CGFloat = 13
     private var wordWrap = true
     private var lastDiff = DiffResult.empty
@@ -58,6 +82,8 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     private let editorContentMargin: CGFloat = 24
     private var mode = WorkspaceMode.editing
     private var hasRestoredDivider = false
+    private var isApplyingDividerLayout = false
+    private var preferredCommittedHeight: CGFloat?
 
     override func loadView() {
         view = NSView()
@@ -71,10 +97,6 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         editorSplitView.isVertical = false
         editorSplitView.dividerStyle = .thin
         editorSplitView.delegate = self
-        editorSplitView.onDividerDragCompleted = { [weak self] in
-            guard let self, self.hasRestoredDivider, self.mode == .editing else { return }
-            UserDefaults.standard.set(Double(self.committedRow.frame.height), forKey: Self.committedPaneHeightDefaultsKey)
-        }
         editorSplitView.setContentHuggingPriority(.defaultLow, for: .vertical)
         editorSplitView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
@@ -171,6 +193,9 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         editorSplitView.addSubview(mainRow)
         editorSplitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
         stack.addArrangedSubview(editorSplitView)
+        configureSearchBar()
+        stack.addArrangedSubview(searchBar)
+        searchBar.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(statusBar)
         stack.addArrangedSubview(stagingDiffView)
         let committedGutterWidth = committedGutter.widthAnchor.constraint(equalToConstant: 46)
@@ -197,6 +222,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         NotificationCenter.default.addObserver(self, selector: #selector(scrollViewDidScroll(_:)), name: NSView.boundsDidChangeNotification, object: mainScroll.contentView)
         NotificationCenter.default.addObserver(self, selector: #selector(scrollViewDidScroll(_:)), name: NSView.boundsDidChangeNotification, object: committedScroll.contentView)
         applyWrapping()
+        updateDocumentVisibility()
     }
 
     override func viewDidLayout() {
@@ -237,11 +263,18 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         let lineCount = max(2, ((proposedPosition - contentInset) / lineHeight).rounded())
         let snappedPosition = contentInset + lineCount * lineHeight
         let maximum = splitView.bounds.height - splitView.dividerThickness - editablePaneMinimumHeight
-        return min(maximum, max(committedPaneMinimumHeight, snappedPosition))
+        let position = min(maximum, max(committedPaneMinimumHeight, snappedPosition))
+        if hasRestoredDivider, !isApplyingDividerLayout, mode == .editing,
+           position >= committedPaneMinimumHeight {
+            preferredCommittedHeight = position
+            UserDefaults.standard.set(Double(position), forKey: Self.committedPaneHeightDefaultsKey)
+        }
+        return position
     }
 
-    func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview subview: NSView) -> Bool {
-        splitView !== editorSplitView || subview !== committedRow
+    func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) {
+        guard splitView === editorSplitView else { return }
+        restoreDividerIfNeeded()
     }
 
     func splitViewDidResizeSubviews(_ notification: Notification) {
@@ -253,11 +286,13 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     }
 
     func showPlaceholder(_ message: String) {
+        diffGeneration += 1
         pendingDiffWorkItem?.cancel()
         buffersByPath.removeAll()
         stageSelectionsByPath.removeAll()
         currentFileURL = nil
         currentRelativePath = nil
+        updateDocumentVisibility()
         baseText = ""
         textView.string = ""
         committedTextView.string = ""
@@ -275,16 +310,16 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     }
 
     @discardableResult
-    func open(file url: URL, relativePath: String, repository: Repository, onSaved: @escaping () -> Void) throws -> Bool {
+    func open(file url: URL, relativePath: String, repository: Repository, prepared: (disk: DiskFileSnapshot, base: String)? = nil, onSaved: @escaping () -> Void) throws -> Bool {
         persistCurrentBuffer()
         pendingDiffWorkItem?.cancel()
         self.onSaved = onSaved
 
         let buffer: EditorBuffer
         if var existing = buffersByPath[relativePath] {
-            let observedModificationDate = try DiskFileReader.modificationDate(at: existing.url)
+            let observedModificationDate = try prepared.map { $0.disk.modificationDate } ?? DiskFileReader.modificationDate(at: existing.url)
             if observedModificationDate != existing.knownDiskModificationDate {
-                let observedDisk = try DiskFileReader.snapshot(at: existing.url)
+                let observedDisk = try prepared?.disk ?? DiskFileReader.snapshot(at: existing.url)
                 if observedDisk.text == existing.knownDiskText {
                     existing.acknowledgeUnchangedDisk(modificationDate: observedDisk.modificationDate)
                 } else if existing.text == existing.knownDiskText, !existing.requiresOverwriteConfirmation {
@@ -316,15 +351,15 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
                 buffersByPath[relativePath] = existing
                 reportBufferedChanges()
             }
-            existing.baseText = repository.committedText(relativePath: relativePath) ?? ""
+            existing.baseText = prepared?.base ?? repository.committedText(relativePath: relativePath) ?? ""
             buffersByPath[relativePath] = existing
             buffer = existing
         } else {
-            let observedDisk = try DiskFileReader.snapshot(at: url)
+            let observedDisk = try prepared?.disk ?? DiskFileReader.snapshot(at: url)
             guard let workingText = observedDisk.text else {
                 throw CocoaError(.fileNoSuchFile)
             }
-            let committedText = repository.committedText(relativePath: relativePath) ?? ""
+            let committedText = prepared?.base ?? repository.committedText(relativePath: relativePath) ?? ""
             let newBuffer = EditorBuffer(
                 url: url,
                 relativePath: relativePath,
@@ -340,15 +375,120 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
             buffer = newBuffer
         }
 
-        activate(buffer)
+        activate(buffer, deferredHighlights: prepared != nil)
         return true
     }
 
-    private func activate(_ buffer: EditorBuffer) {
+    func openAsync(file: URL, relativePath: String, repository: Repository,
+                   onSaved: @escaping () -> Void, completion: @escaping (Result<Bool, Error>) -> Void) {
+        openingGeneration += 1
+        let generation = openingGeneration
+        fileIOQueue.async { [weak self] in
+            let prepared = Result { (disk: try DiskFileReader.snapshot(at: file), base: repository.committedText(relativePath: relativePath) ?? "") }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.openingGeneration == generation else { return }
+                completion(Result {
+                    try self.open(file: file, relativePath: relativePath, repository: repository, prepared: prepared.get(), onSaved: onSaved)
+                })
+            }
+        }
+    }
+
+    func saveCurrentFileAsync(completion: @escaping (Result<Void, Error>) -> Void) {
+        persistCurrentBuffer()
+        guard let path = currentRelativePath else { completion(.success(())); return }
+        saveFileAsync(path: path, completion: completion)
+    }
+
+    private func saveFileAsync(path: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        if savingPaths.contains(path) {
+            repeatSavePaths.insert(path)
+            queuedSaveCompletions[path, default: []].append(completion)
+            return
+        }
+        guard let captured = buffersByPath[path] else { completion(.success(())); return }
+        savingPaths.insert(path)
+        if currentRelativePath == path { statusLabel.stringValue = "Saving \(path)…" }
+        fileIOQueue.async { [weak self] in
+            let disk = Result { try DiskFileReader.snapshot(at: captured.url) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                do {
+                    var saving = captured
+                    let shouldWrite = try self.prepareForSave(&saving, observedDisk: disk.get())
+                    if !shouldWrite {
+                        self.finishBackgroundSave(captured: captured, saved: saving, reloaded: true, completion: completion)
+                        return
+                    }
+                    let snapshot = saving
+                    self.fileIOQueue.async { [weak self] in
+                        let result = Result { () -> EditorBuffer in
+                            var saved = snapshot
+                            if saved.hasUnsavedChanges || saved.requiresOverwriteConfirmation {
+                                try saved.text.write(to: saved.url, atomically: true, encoding: .utf8)
+                            }
+                            saved.markSaved(modificationDate: try DiskFileReader.modificationDate(at: saved.url))
+                            return saved
+                        }
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self else { return }
+                            switch result {
+                            case let .success(saved):
+                                self.finishBackgroundSave(captured: captured, saved: saved, reloaded: false, completion: completion)
+                            case let .failure(error):
+                                self.savingPaths.remove(path)
+                                if self.currentRelativePath == path { self.statusLabel.stringValue = "Save failed: \(path)" }
+                                self.repeatSavePaths.remove(path)
+                                completion(.failure(error))
+                                self.queuedSaveCompletions.removeValue(forKey: path)?.forEach { $0(.failure(error)) }
+                            }
+                        }
+                    }
+                } catch {
+                    self.savingPaths.remove(path)
+                    if self.currentRelativePath == path { self.statusLabel.stringValue = "Save cancelled or failed: \(path)" }
+                    self.repeatSavePaths.remove(path)
+                    completion(.failure(error))
+                    self.queuedSaveCompletions.removeValue(forKey: path)?.forEach { $0(.failure(error)) }
+                }
+            }
+        }
+    }
+
+    private func finishBackgroundSave(captured: EditorBuffer, saved: EditorBuffer, reloaded: Bool,
+                                      completion: @escaping (Result<Void, Error>) -> Void) {
+        persistCurrentBuffer()
+        let path = captured.relativePath
+        if var latest = buffersByPath[path] {
+            let unchangedSinceRequest = latest.text == captured.text
+            latest.knownDiskText = saved.knownDiskText
+            latest.knownDiskModificationDate = saved.knownDiskModificationDate
+            latest.requiresOverwriteConfirmation = reloaded && !unchangedSinceRequest && latest.text != saved.knownDiskText
+            if reloaded && unchangedSinceRequest { latest.text = saved.text }
+            buffersByPath[path] = latest
+            if currentRelativePath == path {
+                if reloaded && unchangedSinceRequest { activate(latest, deferredHighlights: true) }
+                statusLabel.stringValue = latest.hasUnsavedChanges ? "Saved \(path); newer edits are unsaved" : "Saved \(path)"
+            }
+        }
+        savingPaths.remove(path)
+        reportBufferedChanges()
+        onSaved?()
+        completion(.success(()))
+        if repeatSavePaths.remove(path) != nil {
+            let waiters = queuedSaveCompletions.removeValue(forKey: path) ?? []
+            saveFileAsync(path: path) { result in waiters.forEach { $0(result) } }
+        }
+    }
+
+    private func activate(_ buffer: EditorBuffer, deferredHighlights: Bool = false) {
         currentFileURL = buffer.url
         currentRelativePath = buffer.relativePath
+        updateDocumentVisibility()
+        view.layoutSubtreeIfNeeded()
         baseText = buffer.baseText
         textView.string = buffer.text
+        textView.textStorage?.setAttributes(editorAttributes(), range: NSRange(location: 0, length: (buffer.text as NSString).length))
         let textLength = (buffer.text as NSString).length
         let selectionLocation = min(buffer.selection.location, textLength)
         let selectionLength = min(buffer.selection.length, textLength - selectionLocation)
@@ -363,7 +503,15 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         updateActiveLineHighlight()
         statusLabel.stringValue = ""
         view.window?.title = "DiffEdit — \(buffer.relativePath)"
-        recomputeHighlights()
+        if deferredHighlights {
+            lastDiff = .empty
+            textView.fullLineHighlightedLines = []
+            textView.deletionMarkers = []
+            updateCommittedContext()
+            textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+        } else {
+            recomputeHighlights()
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             guard self.stagingDiffView.isHidden else { return }
@@ -396,6 +544,21 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         reportBufferedChanges()
         onSaved?()
         recomputeHighlights()
+    }
+
+    func saveAllFilesAsync(completion: @escaping (Result<Void, Error>) -> Void) {
+        persistCurrentBuffer()
+        let paths = bufferedChangePaths.sorted()
+        func saveNext(_ index: Int) {
+            guard index < paths.count else { completion(.success(())); return }
+            saveFileAsync(path: paths[index]) { result in
+                switch result {
+                case .success: saveNext(index + 1)
+                case let .failure(error): completion(.failure(error))
+                }
+            }
+        }
+        saveNext(0)
     }
 
     func saveAllFiles() throws {
@@ -447,6 +610,34 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
             base: buffer.baseText,
             current: buffer.text
         ).selectableChanges.isEmpty
+    }
+
+    func commitSnapshot() -> (buffer: EditorBuffer?, available: Set<StagingChangeID>, selected: Set<StagingChangeID>, paths: [String]) {
+        persistCurrentBuffer()
+        let state = currentRelativePath.flatMap { stageSelectionsByPath[$0] }
+        return (currentRelativePath.flatMap { buffersByPath[$0] }, state?.available ?? [], state?.selected ?? [], Array(buffersByPath.keys))
+    }
+
+    func applyCommittedBases(_ bases: [String: String]) {
+        persistCurrentBuffer()
+        for (path, base) in bases {
+            buffersByPath[path]?.baseText = base
+        }
+        stageSelectionsByPath.removeAll()
+        if let path = currentRelativePath, let buffer = buffersByPath[path] {
+            baseText = buffer.baseText
+            textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+        }
+    }
+
+    func setOperationBusy(_ busy: Bool) {
+        textView.isEditable = !busy
+        if busy {
+            openingGeneration += 1
+            view.window?.makeFirstResponder(nil)
+        } else if mode == .editing, currentFileURL != nil {
+            view.window?.makeFirstResponder(textView)
+        }
     }
 
     func refreshCommittedBases(using repository: Repository) {
@@ -653,12 +844,12 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         reportBufferedChanges()
     }
 
-    private func prepareForSave(_ buffer: inout EditorBuffer) throws -> Bool {
-        let observedModificationDate = try DiskFileReader.modificationDate(at: buffer.url)
+    private func prepareForSave(_ buffer: inout EditorBuffer, observedDisk preparedDisk: DiskFileSnapshot? = nil) throws -> Bool {
+        let observedModificationDate = try preparedDisk.map { $0.modificationDate } ?? DiskFileReader.modificationDate(at: buffer.url)
         let metadataChanged = observedModificationDate != buffer.knownDiskModificationDate
-        let observedDisk = metadataChanged
-            ? try DiskFileReader.snapshot(at: buffer.url)
-            : DiskFileSnapshot(text: buffer.knownDiskText, modificationDate: buffer.knownDiskModificationDate)
+        let observedDisk = try preparedDisk ?? (metadataChanged
+            ? DiskFileReader.snapshot(at: buffer.url)
+            : DiskFileSnapshot(text: buffer.knownDiskText, modificationDate: buffer.knownDiskModificationDate))
         let diskChanged = observedDisk.text != buffer.knownDiskText
         if metadataChanged, !diskChanged {
             buffer.acknowledgeUnchangedDisk(modificationDate: observedDisk.modificationDate)
@@ -723,39 +914,56 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         textView.font = editorFont()
         committedTextView.font = editorFont()
         textView.insertionPointColor = DiffPalette.insertionPoint
+        textView.textStorage?.setAttributes(editorAttributes(), range: NSRange(location: 0, length: (textView.string as NSString).length))
         recomputeHighlights()
     }
 
     func textDidChange(_ notification: Notification) {
         guard !isApplyingHighlights else { return }
-        let refreshImmediately = pendingLineStructureChange
-        pendingLineStructureChange = false
         updateTypingAttributesForSelection()
         updateActiveLineHighlight()
         persistCurrentBuffer()
         pendingDiffWorkItem?.cancel()
-        if refreshImmediately {
-            pendingDiffWorkItem = nil
-            recomputeHighlights()
-            return
-        }
+        diffGeneration += 1
+        let generation = diffGeneration
         let workItem = DispatchWorkItem { [weak self] in
-            self?.recomputeHighlights()
+            guard let self, self.diffGeneration == generation else { return }
+            let base = self.baseText
+            let current = self.textView.string
+            let path = self.currentRelativePath
+            self.typingDiffQueue.async { [weak self] in
+                let result = DiffEngine.diff(base: base, current: current)
+                let plan = DiffEngine.selectiveStagingPlan(base: base, current: current)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.diffGeneration == generation,
+                          self.currentRelativePath == path,
+                          !self.textView.hasMarkedText() else { return }
+                    self.preparedStagingPlan = (base, current, plan)
+                    self.lastDiff = result
+                    self.committedContextNeedsRefresh = true
+                    if let path {
+                        _ = self.updateStageSelection(relativePath: path, selectableChanges: plan.selectableChanges)
+                    }
+                    self.applyHighlights(to: current)
+                    self.updateCommittedContext()
+                    self.updateStagingDiff()
+                }
+            }
         }
         pendingDiffWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: workItem)
     }
 
     func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
-        pendingLineStructureChange = pendingLineStructureChange || TextEditClassifier.changesLineStructure(
-            original: textView.string,
-            range: affectedCharRange,
-            replacement: replacementString ?? ""
-        )
+        guard textView === self.textView else { return true }
+        lastDiff.adjustDecorations(for: affectedCharRange, replacement: replacementString ?? "", in: textView.string as NSString)
+        self.textView.deletionMarkers = lastDiff.currentDeletionMarkers
+        self.textView.fullLineHighlightedLines = lastDiff.currentTouchedLines
         return true
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
+        guard !isApplyingHighlights else { return }
         updateTypingAttributesForSelection()
         updateActiveLineHighlight()
         updateCommittedContext()
@@ -850,24 +1058,39 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     }
 
     private func restoreDividerIfNeeded() {
-        guard !hasRestoredDivider else { return }
+        guard !isApplyingDividerLayout else { return }
         let availableHeight = editorSplitView.bounds.height
         let requiredHeight = committedPaneMinimumHeight + editorSplitView.dividerThickness + editablePaneMinimumHeight
-        guard availableHeight >= requiredHeight else { return }
-        hasRestoredDivider = true
-        let savedHeight = (UserDefaults.standard.object(forKey: Self.committedPaneHeightDefaultsKey) as? NSNumber)
-            .map { CGFloat(truncating: $0) }
-        let desiredHeight = savedHeight ?? committedPaneDefaultHeight
-        let maximumHeight = availableHeight - editorSplitView.dividerThickness - editablePaneMinimumHeight
-        let committedHeight = min(maximumHeight, max(committedPaneMinimumHeight, desiredHeight))
-        editorSplitView.setPosition(committedHeight, ofDividerAt: 0)
+        let canRestore = availableHeight >= requiredHeight
+        if canRestore, preferredCommittedHeight == nil {
+            let savedHeight = (UserDefaults.standard.object(forKey: Self.committedPaneHeightDefaultsKey) as? NSNumber)
+                .map { CGFloat(truncating: $0) }
+            preferredCommittedHeight = savedHeight.flatMap {
+                $0.isFinite && $0 >= committedPaneMinimumHeight ? $0 : nil
+            } ?? committedPaneDefaultHeight
+        }
+        let maximumHeight = max(0, availableHeight - editorSplitView.dividerThickness - editablePaneMinimumHeight)
+        let height = min(maximumHeight, max(committedPaneMinimumHeight, preferredCommittedHeight ?? committedPaneDefaultHeight))
+        isApplyingDividerLayout = true
+        defer { isApplyingDividerLayout = false }
+        // Own automatic resizing so startup, window resizing and mode changes
+        // cannot collapse the past pane or overwrite the user's chosen height.
+        let width = editorSplitView.bounds.width
+        committedRow.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        let mainY = min(availableHeight, height + editorSplitView.dividerThickness)
+        mainRow.frame = NSRect(x: 0, y: mainY, width: width, height: availableHeight - mainY)
+        if canRestore { hasRestoredDivider = true }
     }
 
     private func recomputeHighlights() {
+        diffGeneration += 1
+        pendingDiffWorkItem?.cancel()
+        committedContextNeedsRefresh = true
         let workingText = textView.string
         lastDiff = DiffEngine.diff(base: baseText, current: workingText)
         if let currentRelativePath {
             let plan = DiffEngine.selectiveStagingPlan(base: baseText, current: workingText)
+            preparedStagingPlan = (baseText, workingText, plan)
             _ = updateStageSelection(relativePath: currentRelativePath, selectableChanges: plan.selectableChanges)
         }
         applyHighlights(to: workingText)
@@ -902,15 +1125,165 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     func setMode(_ mode: WorkspaceMode) {
         self.mode = mode
         let editing = mode == .editing
-        editorSplitView.isHidden = !editing
-        statusBar.isHidden = !editing
-        stagingDiffView.isHidden = editing
+        updateDocumentVisibility()
         if !editing {
             persistCurrentBuffer()
             updateStagingDiff()
-        } else {
+        } else if currentFileURL != nil {
             view.window?.makeFirstResponder(textView)
         }
+    }
+
+    private func updateDocumentVisibility() {
+        let hasDocument = currentFileURL != nil
+        editorSplitView.isHidden = !hasDocument || mode != .editing
+        statusBar.isHidden = !hasDocument || mode != .editing
+        stagingDiffView.isHidden = !hasDocument || mode != .staging
+        searchBar.isHidden = !hasDocument || mode != .editing || !searchIsOpen
+    }
+
+    private func configureSearchBar() {
+        searchBar.orientation = .vertical
+        searchBar.alignment = .width
+        searchBar.spacing = 6
+        searchBar.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+        searchBar.translatesAutoresizingMaskIntoConstraints = false
+        searchBar.setContentHuggingPriority(.required, for: .vertical)
+        func button(_ title: String, _ action: Selector) -> NSButton {
+            let button = NSButton(title: title, target: self, action: action)
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            return button
+        }
+        for (field, placeholder, identifier) in [
+            (searchField, "Find", "findField"),
+            (replacementField, "Replace with", "replacementField")
+        ] {
+            field.placeholderString = placeholder
+            field.identifier = NSUserInterfaceItemIdentifier(identifier)
+            field.setAccessibilityLabel(placeholder)
+            field.delegate = self
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        searchFeedback.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        searchFeedback.textColor = .secondaryLabelColor
+        searchFeedback.setContentHuggingPriority(.required, for: .horizontal)
+        let row = NSStackView(views: [searchField, searchFeedback,
+            button("Previous", #selector(previousSearchMatch(_:))),
+            button("Next", #selector(nextSearchMatch(_:))),
+            button("Close", #selector(closeSearch(_:)))])
+        row.spacing = 6
+        searchBar.addArrangedSubview(row)
+        replacementRow.orientation = .horizontal
+        replacementRow.spacing = 6
+        replacementRow.addArrangedSubview(replacementField)
+        replacementRow.addArrangedSubview(button("Replace", #selector(replaceSearchMatch(_:))))
+        replacementRow.addArrangedSubview(button("Replace All", #selector(replaceAllSearchMatches(_:))))
+        searchBar.addArrangedSubview(replacementRow)
+        replacementRow.isHidden = true
+        searchBar.isHidden = true
+    }
+
+    func showSearch(replacing: Bool) {
+        guard currentFileURL != nil, mode == .editing else { return }
+        let selection = textView.selectedRange()
+        if selection.length > 0 {
+            let selected = (textView.string as NSString).substring(with: selection)
+            if !selected.contains("\n"), !selected.contains("\r") { searchField.stringValue = selected }
+        }
+        searchIsOpen = true
+        replacementRow.isHidden = !replacing
+        searchFeedback.stringValue = ""
+        updateDocumentVisibility()
+        view.layoutSubtreeIfNeeded()
+        view.window?.makeFirstResponder(searchField)
+        searchField.selectText(nil)
+    }
+
+    func findMatch(backwards: Bool, includingSelection: Bool = false) {
+        guard currentFileURL != nil, mode == .editing else { return }
+        let query = searchField.stringValue
+        guard !query.isEmpty else { showSearch(replacing: false); return }
+        let text = textView.string as NSString
+        let selection = textView.selectedRange()
+        let start = backwards ? selection.location : (includingSelection ? selection.location : NSMaxRange(selection))
+        let first = backwards ? NSRange(location: 0, length: start) : NSRange(location: start, length: text.length - start)
+        let second = backwards ? NSRange(location: start, length: text.length - start) : NSRange(location: 0, length: start)
+        var options: NSString.CompareOptions = [.caseInsensitive]
+        if backwards { options.insert(.backwards) }
+        var match = text.range(of: query, options: options, range: first)
+        let wrapped = match.location == NSNotFound
+        if wrapped { match = text.range(of: query, options: options, range: second) }
+        guard match.location != NSNotFound else {
+            searchFeedback.stringValue = "No matches"
+            return
+        }
+        searchFeedback.stringValue = wrapped ? "Wrapped" : ""
+        textView.setSelectedRange(match)
+        textView.scrollRangeToVisible(match)
+        textView.showFindIndicator(for: match)
+    }
+
+    @objc private func nextSearchMatch(_ sender: Any?) { findMatch(backwards: false) }
+    @objc private func previousSearchMatch(_ sender: Any?) { findMatch(backwards: true) }
+
+    @objc private func closeSearch(_ sender: Any?) {
+        searchIsOpen = false
+        updateDocumentVisibility()
+        view.window?.makeFirstResponder(textView)
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard notification.object as? NSTextField === searchField else { return }
+        searchFeedback.stringValue = ""
+        if !searchField.stringValue.isEmpty { findMatch(backwards: false, includingSelection: true) }
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            closeSearch(nil)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            if control === replacementField { replaceSearchMatch(nil) }
+            else { findMatch(backwards: NSApp.currentEvent?.modifierFlags.contains(.shift) == true) }
+            return true
+        }
+        return false
+    }
+
+    @objc private func replaceSearchMatch(_ sender: Any?) {
+        guard currentFileURL != nil, mode == .editing, !searchField.stringValue.isEmpty else { return }
+        let range = textView.selectedRange()
+        let selected = (textView.string as NSString).substring(with: range)
+        guard selected.compare(searchField.stringValue, options: [.caseInsensitive]) == .orderedSame else {
+            findMatch(backwards: false, includingSelection: true)
+            return
+        }
+        let replacement = replacementField.stringValue
+        guard textView.shouldChangeText(in: range, replacementString: replacement) else { return }
+        textView.textStorage?.replaceCharacters(in: range, with: replacement)
+        textView.setSelectedRange(NSRange(location: range.location + (replacement as NSString).length, length: 0))
+        textView.didChangeText()
+        textView.undoManager?.setActionName("Replace")
+        findMatch(backwards: false)
+    }
+
+    @objc private func replaceAllSearchMatches(_ sender: Any?) {
+        guard currentFileURL != nil, mode == .editing, !searchField.stringValue.isEmpty else { return }
+        let original = textView.string as NSString
+        let range = NSRange(location: 0, length: original.length)
+        let replaced = original.replacingOccurrences(of: searchField.stringValue, with: replacementField.stringValue, options: [.caseInsensitive], range: range)
+        guard replaced != textView.string else { return }
+        guard textView.shouldChangeText(in: range, replacementString: replaced) else { return }
+        textView.textStorage?.replaceCharacters(in: range, with: replaced)
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        textView.didChangeText()
+        textView.undoManager?.setActionName("Replace All")
+        searchFeedback.stringValue = "Replaced all"
     }
 
     private func updateStagingDiff() {
@@ -923,35 +1296,49 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
             return
         }
         let currentText = textView.string
-        let plan = DiffEngine.selectiveStagingPlan(base: buffer.baseText, current: currentText)
-        let state = updateStageSelection(relativePath: currentRelativePath, selectableChanges: plan.selectableChanges)
-        stagingDiffView.setDocument(
-            rows: plan.diffRows,
-            selectedChanges: state.selected
-        )
+        let base = buffer.baseText
+        stagingGeneration += 1
+        let generation = stagingGeneration
+        if let prepared = preparedStagingPlan, prepared.base == base, prepared.current == currentText {
+            renderStagingPlan(prepared.plan, relativePath: currentRelativePath)
+            return
+        }
+        typingDiffQueue.async { [weak self] in
+            let plan = DiffEngine.selectiveStagingPlan(base: base, current: currentText)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.stagingGeneration == generation,
+                      self.currentRelativePath == currentRelativePath,
+                      self.baseText == base, self.textView.string == currentText,
+                      self.mode == .staging else { return }
+                self.preparedStagingPlan = (base, currentText, plan)
+                self.renderStagingPlan(plan, relativePath: currentRelativePath)
+            }
+        }
+    }
+
+    private func renderStagingPlan(_ plan: SelectiveStagingPlan, relativePath: String) {
+        let state = updateStageSelection(relativePath: relativePath, selectableChanges: plan.selectableChanges)
+        stagingDiffView.setDocument(rows: plan.diffRows, selectedChanges: state.selected)
     }
 
     private func applyHighlights(to string: String) {
         isApplyingHighlights = true
-        let selection = TextSelectionSnapshot(textView: textView)
         let scrollOrigin = mainScroll.contentView.bounds.origin
-        let attributed = NSMutableAttributedString(
-            string: string,
-            attributes: editorAttributes()
-        )
+        guard let storage = textView.textStorage else {
+            isApplyingHighlights = false
+            return
+        }
         textView.fullLineHighlightedLines = lastDiff.currentTouchedLines
         textView.deletionMarkers = lastDiff.currentDeletionMarkers
-        for range in lastDiff.insertedWordRanges {
-            if NSMaxRange(range) <= attributed.length {
-                attributed.addAttribute(.backgroundColor, value: DiffPalette.insertedText, range: range)
-            }
+        // Highlighting must never replace document characters or line endings.
+        // Attribute-only edits also avoid invalidating the entire glyph buffer.
+        storage.beginEditing()
+        storage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: storage.length))
+        for range in lastDiff.insertedWordRanges where NSMaxRange(range) <= storage.length {
+            storage.addAttribute(.backgroundColor, value: DiffPalette.insertedText, range: range)
         }
-        textView.undoManager?.disableUndoRegistration()
-        textView.textStorage?.setAttributedString(attributed)
-        textView.font = editorFont()
-        selection.restore(to: textView)
+        storage.endEditing()
         updateTypingAttributesForSelection()
-        textView.undoManager?.enableUndoRegistration()
         updateChangeOverview()
         mainGutter?.needsDisplay = true
         mainScroll.contentView.scroll(to: scrollOrigin)
@@ -964,7 +1351,9 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         if let backgroundColor = inheritedTypingBackgroundColor() {
             attributes[.backgroundColor] = backgroundColor
         }
-        textView.typingAttributes = attributes
+        if !(textView.typingAttributes as NSDictionary).isEqual(to: attributes) {
+            textView.typingAttributes = attributes
+        }
     }
 
     private func inheritedTypingBackgroundColor() -> NSColor? {
@@ -1006,7 +1395,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     private func updateCommittedContext() {
         let currentLine = (textView.string as NSString).lineIndex(containing: textView.selectedRange().location)
         let mappedBaseLine = lastDiff.currentToBaseLine[currentLine] ?? currentLine
-        let baseLines = baseText.splitKeepingEmptyLines()
+        let baseLines = cachedBaseLines
         var context = ""
         var contextBaseLines: [Int?] = []
         let contextRadius = committedContextRadius()
@@ -1022,6 +1411,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
                 context += "\n"
             }
         }
+        let needsRebuild = committedContextNeedsRefresh || committedVisibleBaseLines != contextBaseLines
         committedVisibleBaseLines = contextBaseLines
         let currentLineStart = (textView.string as NSString).lineStartOffset(forLineIndex: currentLine)
         let currentColumn = max(0, textView.selectedRange().location - currentLineStart)
@@ -1032,6 +1422,8 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         } else {
             committedTextView.caretMarker = nil
         }
+        guard needsRebuild else { return }
+        committedContextNeedsRefresh = false
         let attributed = NSMutableAttributedString(
             string: context,
             attributes: editorAttributes()

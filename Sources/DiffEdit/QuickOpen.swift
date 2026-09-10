@@ -7,8 +7,11 @@ struct FileReference {
 }
 
 final class QuickOpenController: NSWindowController, NSWindowDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
-    private let allFiles: [FileReference]
+    private var allFiles: [FileReference]
     private var filteredFiles: [FileReference]
+    private let filterQueue = DispatchQueue(label: "com.diffedit.quick-open-filter", qos: .userInitiated)
+    private var filterGeneration = 0
+    private var isFiltering = false
     private let onClose: () -> Void
     private let onOpen: (FileReference) -> Void
     private let searchField = QuickOpenSearchField()
@@ -37,6 +40,11 @@ final class QuickOpenController: NSWindowController, NSWindowDelegate, NSSearchF
         configure()
     }
 
+    func setFiles(_ files: [FileReference]) {
+        allFiles = files
+        applyFilter()
+    }
+
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
@@ -61,6 +69,7 @@ final class QuickOpenController: NSWindowController, NSWindowDelegate, NSSearchF
     }
 
     func windowWillClose(_ notification: Notification) {
+        filterGeneration += 1
         onClose()
     }
 
@@ -98,6 +107,7 @@ final class QuickOpenController: NSWindowController, NSWindowDelegate, NSSearchF
     }
 
     func acceptSelection() {
+        guard !isFiltering else { return }
         guard !filteredFiles.isEmpty else { return }
         let row = tableView.selectedRow >= 0 ? tableView.selectedRow : 0
         let file = filteredFiles[row]
@@ -133,21 +143,30 @@ final class QuickOpenController: NSWindowController, NSWindowDelegate, NSSearchF
     }
 
     private func applyFilter() {
-        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if query.isEmpty {
-            filteredFiles = allFiles
-        } else {
-            let parts = query.split(separator: " ").map(String.init)
-            filteredFiles = allFiles.filter { file in
+        filterGeneration += 1
+        let generation = filterGeneration
+        let files = allFiles
+        let parts = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased().split(separator: " ").map(String.init)
+        isFiltering = true
+        tableView.deselectAll(nil)
+        filterQueue.async { [weak self] in
+            let matches = parts.isEmpty ? files : files.filter { file in
                 let path = file.relativePath.lowercased()
                 return parts.allSatisfy { path.contains($0) }
             }
-        }
-        tableView.reloadData()
-        if !filteredFiles.isEmpty {
-            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.filterGeneration == generation else { return }
+                self.isFiltering = false
+                self.filteredFiles = matches
+                self.tableView.reloadData()
+                if !matches.isEmpty {
+                    self.tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                }
+            }
         }
     }
+
 }
 
 final class QuickOpenPanel: NSPanel {

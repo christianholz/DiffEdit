@@ -11,6 +11,49 @@ struct DiffResult {
     var revertActions: [RevertAction]
 
     static let empty = DiffResult(currentTouchedLines: [], baseTouchedLines: [], insertedWordRanges: [], deletedWordRanges: [], currentDeletionMarkers: [], currentToBaseLine: [:], currentToBaseColumn: [:], revertActions: [])
+    mutating func adjustDecorations(for range: NSRange, replacement: String, in original: NSString) {
+        let startLine = original.lineIndex(containing: range.location)
+        let endLine = original.lineIndex(containing: NSMaxRange(range))
+        let startColumn = range.location - original.lineStartOffset(forLineIndex: startLine)
+        let endColumn = NSMaxRange(range) - original.lineStartOffset(forLineIndex: endLine)
+        let inserted = replacement as NSString
+        let insertedLines = inserted.lineIndex(containing: inserted.length)
+        let newEndLine = startLine + insertedLines
+        let newEndColumn = insertedLines == 0 ? startColumn + inserted.length
+            : inserted.length - inserted.lineStartOffset(forLineIndex: insertedLines)
+        let lineDelta = newEndLine - endLine
+        currentDeletionMarkers = currentDeletionMarkers.compactMap { marker in
+            if marker.line < startLine || (marker.line == startLine && marker.column < startColumn) { return marker }
+            // An anchor inside removed text no longer has a meaningful position.
+            if marker.line < endLine || (marker.line == endLine && marker.column < endColumn) { return nil }
+            if marker.line == endLine {
+                return DeletionMarker(line: newEndLine, column: marker.kind == .lineBoundaryBefore ? 0 : newEndColumn + marker.column - endColumn, kind: marker.kind)
+            }
+            return DeletionMarker(line: marker.line + lineDelta, column: marker.column, kind: marker.kind)
+        }
+        var touched = Set(currentTouchedLines.compactMap { line -> Int? in
+            if line < startLine { return line }
+            if line > endLine { return line + lineDelta }
+            return nil
+        })
+        touched.formUnion(startLine...newEndLine)
+        currentTouchedLines = touched
+        if lineDelta != 0 {
+            let baseLine = currentToBaseLine[startLine]
+            currentToBaseLine = Dictionary(uniqueKeysWithValues: currentToBaseLine.compactMap { line, base -> (Int, Int)? in
+                if line < startLine { return (line, base) }
+                if line > endLine { return (line + lineDelta, base) }
+                return nil
+            })
+            if let baseLine {
+                for line in startLine...newEndLine { currentToBaseLine[line] = baseLine }
+            }
+        }
+        // Character mappings and revert ranges belong to the old snapshot.
+        currentToBaseColumn.removeAll()
+        revertActions.removeAll()
+    }
+
 }
 
 final class RevertAction: NSObject {
@@ -334,6 +377,18 @@ enum DiffEngine {
             var addedBoundaryDeletionMarker = false
             let boundaryDeletionMarker: DeletionMarker? = {
                 guard isPureLineDeletion else { return nil }
+                // Reducing an existing blank gap is visual noise; removing the
+                // last blank line still marks the lost paragraph separation.
+                let deletesOnlyBlankLines = pendingDeletes.allSatisfy {
+                    $0.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }
+                let retainsBlankLine = [newIndex - 1, newIndex].contains { index in
+                    guard currentLines.indices.contains(index) else { return false }
+                    let line = currentLines[index]
+                    // The empty EOF sentinel is not a surviving blank line.
+                    return !line.isEmpty && line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }
+                if deletesOnlyBlankLines && retainsBlankLine { return nil }
                 guard !currentLines.isEmpty else {
                     return DeletionMarker(line: 0, column: 0, kind: .lineBoundaryBefore)
                 }
@@ -348,10 +403,11 @@ enum DiffEngine {
                     kind: .lineBoundaryAfter
                 )
             }()
-            let count = max(pendingDeletes.count, pendingInserts.count)
-            for offset in 0..<count {
-                let deletion = offset < pendingDeletes.count ? pendingDeletes[offset] : nil
-                let insertion = offset < pendingInserts.count ? pendingInserts[offset] : nil
+            for (oldOffset, newOffset) in alignedChangedLines(
+                old: pendingDeletes.map { $0.1 }, new: pendingInserts.map { $0.1 }
+            ) {
+                let deletion = oldOffset.map { pendingDeletes[$0] }
+                let insertion = newOffset.map { pendingInserts[$0] }
                 if let deletion, let insertion {
                     let wordDiff = wordDiff(old: deletion.1, new: insertion.1)
                     result.deletedWordRanges += wordDiff.deleted.map { LineRange(line: deletion.0, range: $0) }
@@ -411,16 +467,120 @@ enum DiffEngine {
             }
         }
         flushChangedBlock()
+        result.currentDeletionMarkers = coalescedDeletionMarkers(result.currentDeletionMarkers, lines: currentLines)
+        return result
+    }
+
+    private static func coalescedDeletionMarkers(_ markers: [DeletionMarker], lines: [String]) -> [DeletionMarker] {
+        func boundary(_ marker: DeletionMarker) -> Int {
+            marker.line + (marker.kind == .lineBoundaryAfter ? 1 : 0)
+        }
+        let horizontal = markers.filter { $0.kind != .inline }.sorted { boundary($0) < boundary($1) }
+        var kept: [DeletionMarker] = []
+        for marker in horizontal {
+            if let previous = kept.last {
+                let start = min(lines.count, max(0, boundary(previous)))
+                let end = min(lines.count, max(start, boundary(marker)))
+                if lines[start..<end].allSatisfy({ $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                    continue
+                }
+            }
+            kept.append(marker)
+        }
+        return (kept + markers.filter { $0.kind == .inline }).sorted {
+            if $0.line != $1.line { return $0.line < $1.line }
+            return $0.column < $1.column
+        }
+    }
+
+    // Match similar lines monotonically before comparing words. Positional
+    // pairing mistakes inserted sentences for replacements of following lines.
+    private static func alignedChangedLines(old: [String], new: [String]) -> [(Int?, Int?)] {
+        guard !old.isEmpty, !new.isEmpty else {
+            return old.indices.map { (Optional($0), nil) } + new.indices.map { (nil, Optional($0)) }
+        }
+        // Bound work for wholesale rewrites; ordinary edit blocks are small.
+        guard old.count <= 40_000 / new.count else {
+            return (0..<max(old.count, new.count)).map {
+                ($0 < old.count ? $0 : nil, $0 < new.count ? $0 : nil)
+            }
+        }
+        func words(_ line: String) -> Set<String> {
+            Set(line.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init))
+        }
+        let oldWords = old.map(words)
+        let newWords = new.map(words)
+        let width = new.count + 1
+        var scores = [Double](repeating: 0, count: (old.count + 1) * width)
+        var matches = [Bool](repeating: false, count: scores.count)
+        for i in (0..<old.count).reversed() {
+            for j in (0..<new.count).reversed() {
+                let total = oldWords[i].count + newWords[j].count
+                let similarity = old[i] == new[j] ? 1 : (total == 0 ? 0 : Double(2 * oldWords[i].intersection(newWords[j]).count) / Double(total))
+                let index = i * width + j
+                let skip = max(scores[(i + 1) * width + j], scores[index + 1])
+                let paired = similarity + scores[(i + 1) * width + j + 1]
+                if similarity >= 0.5, paired >= skip {
+                    scores[index] = paired
+                    matches[index] = true
+                } else {
+                    scores[index] = skip
+                }
+            }
+        }
+        var anchors: [(Int, Int)] = []
+        var i = 0
+        var j = 0
+        while i < old.count, j < new.count {
+            if matches[i * width + j] {
+                anchors.append((i, j))
+                i += 1
+                j += 1
+            } else if scores[(i + 1) * width + j] >= scores[i * width + j + 1] {
+                i += 1
+            } else {
+                j += 1
+            }
+        }
+        var result: [(Int?, Int?)] = []
+        i = 0
+        j = 0
+        // Preserve positional word comparisons for rewritten spans between
+        // strong matches, including blocks with no similar lines at all.
+        for (oldEnd, newEnd) in anchors + [(old.count, new.count)] {
+            while i < oldEnd || j < newEnd {
+                result.append((i < oldEnd ? i : nil, j < newEnd ? j : nil))
+                if i < oldEnd { i += 1 }
+                if j < newEnd { j += 1 }
+            }
+            if oldEnd < old.count, newEnd < new.count {
+                result.append((oldEnd, newEnd))
+                i += 1
+                j += 1
+            }
+        }
         return result
     }
 
     private static func wordDiff(old: String, new: String) -> (deleted: [NSRange], inserted: [NSRange], deletionMarkerColumns: [Int], currentToBaseColumn: [Int: Int]) {
         let oldTokens = tokenize(old)
         let newTokens = tokenize(new)
-        let operations = sequenceDiff(
-            old: contextualDiffKeys(for: oldTokens),
-            new: contextualDiffKeys(for: newTokens)
-        )
+        let oldKeys = contextualDiffKeys(for: oldTokens)
+        var newKeys = contextualDiffKeys(for: newTokens)
+        // Unchanged punctuation at either edge must not become a change just
+        // because the neighboring word was edited.
+        var prefix = 0
+        while prefix < min(oldTokens.count, newTokens.count), oldTokens[prefix].text == newTokens[prefix].text {
+            newKeys[prefix] = oldKeys[prefix]
+            prefix += 1
+        }
+        var suffix = 0
+        while suffix < min(oldTokens.count, newTokens.count) - prefix,
+              oldTokens[oldTokens.count - 1 - suffix].text == newTokens[newTokens.count - 1 - suffix].text {
+            newKeys[newTokens.count - 1 - suffix] = oldKeys[oldTokens.count - 1 - suffix]
+            suffix += 1
+        }
+        let operations = sequenceDiff(old: oldKeys, new: newKeys)
         var deleted: [NSRange] = []
         var inserted: [NSRange] = []
         var markerColumns: [Int] = []

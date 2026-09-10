@@ -55,10 +55,17 @@ contains staged files outside the opened folder.
 | --- | --- |
 | Quick Open | <kbd>⌘T</kbd> |
 | Save current file | <kbd>⌘S</kbd> |
+| Find / replace | <kbd>⌘F</kbd> / <kbd>⌥⌘F</kbd> |
+| Next / previous match | <kbd>⌘G</kbd> / <kbd>⇧⌘G</kbd> |
 | Previous / next change | <kbd>⇧⌘,</kbd> / <kbd>⇧⌘.</kbd> |
 | Previous / next paragraph | <kbd>⌥↑</kbd> / <kbd>⌥↓</kbd> |
 | Toggle word wrapping | <kbd>⌥⌘W</kbd> |
 | Increase / decrease type size | <kbd>⌘+</kbd> / <kbd>⌘−</kbd> |
+
+Search operates on the current editable document, using case-insensitive literal
+matching and wrapping at the ends. Return and Shift-Return navigate from the
+search field; Escape closes the bar. Replace and Replace All update the buffer
+and support Undo; save the file to write replacements to disk.
 
 ## Build and run
 

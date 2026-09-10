@@ -2,13 +2,6 @@ import AppKit
 import Foundation
 
 final class EditorSplitView: NSSplitView {
-    var onDividerDragCompleted: (() -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        super.mouseDown(with: event)
-        onDividerDragCompleted?()
-    }
-
     override var dividerThickness: CGFloat { 5 }
 
     override func drawDivider(in rect: NSRect) {
@@ -20,6 +13,54 @@ final class EditorSplitView: NSSplitView {
 }
 
 final class LineHighlightTextView: NSTextView {
+    private var typingUndoEnd: Int?
+    private var typingUndoEndedWithSpace = false
+
+    private func endTypingUndoChunk() {
+        breakUndoCoalescing()
+        typingUndoEnd = nil
+        typingUndoEndedWithSpace = false
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        let inserted = (insertString as? NSAttributedString)?.string ?? (insertString as? String) ?? ""
+        let range = replacementRange.location == NSNotFound ? selectedRange() : replacementRange
+        let isSingleCharacter = inserted.count == 1
+        let isSpace = inserted.allSatisfy(\.isWhitespace)
+        let isNewline = inserted.contains(where: \.isNewline)
+        if !isSingleCharacter || isNewline || range.length > 0 || typingUndoEnd != range.location
+            || (typingUndoEndedWithSpace && !isSpace) {
+            endTypingUndoChunk()
+        }
+        super.insertText(insertString, replacementRange: replacementRange)
+        if isSingleCharacter, !isNewline {
+            typingUndoEnd = selectedRange().location
+            typingUndoEndedWithSpace = isSpace
+        } else {
+            endTypingUndoChunk()
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        endTypingUndoChunk()
+        super.mouseDown(with: event)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        endTypingUndoChunk()
+        super.rightMouseDown(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        endTypingUndoChunk()
+        super.scrollWheel(with: event)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        endTypingUndoChunk()
+        return super.resignFirstResponder()
+    }
+
     var lineNumberProvider: ((Int) -> String?)?
     var shortcutHandler: ((EditorShortcut) -> Void)?
     var contextMenuProvider: ((Int) -> NSMenu?)?
@@ -61,6 +102,10 @@ final class LineHighlightTextView: NSTextView {
 
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if [36, 48, 53, 76, 115, 116, 119, 121, 123, 124, 125, 126].contains(event.keyCode)
+            || flags.contains(.command) || flags.contains(.control) {
+            endTypingUndoChunk()
+        }
         if flags.contains(.option), !flags.contains(.command), !flags.contains(.control) {
             if event.keyCode == 126 {
                 shortcutHandler?(.previousParagraph)
@@ -144,6 +189,19 @@ final class LineHighlightTextView: NSTextView {
         return includeNewline ? text : text.trimmingCharacters(in: .newlines)
     }
 
+    private func visibleDocumentLines() -> ClosedRange<Int> {
+        guard let layoutManager, let textContainer else { return 0...0 }
+        let bounds = enclosingScrollView?.contentView.bounds ?? visibleRect
+        let containerBounds = bounds.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+        let glyphs = layoutManager.glyphRange(forBoundingRect: containerBounds, in: textContainer)
+        let characters = layoutManager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+        let text = string as NSString
+        let first = text.lineIndex(containing: min(characters.location, text.length))
+        let last = text.lineIndex(containing: min(NSMaxRange(characters), text.length))
+        // Include neighboring boundaries for horizontal deletion bars.
+        return max(0, first - 1)...(last + 1)
+    }
+
     private func drawFullLineHighlights(in dirtyRect: NSRect) {
         guard !fullLineHighlightedLines.isEmpty,
               let layoutManager,
@@ -154,7 +212,8 @@ final class LineHighlightTextView: NSTextView {
         let color = DiffPalette.changedLine
         color.setFill()
 
-        for line in fullLineHighlightedLines {
+        let visibleLines = visibleDocumentLines()
+        for line in fullLineHighlightedLines where visibleLines.contains(line) {
             let characterRange = nsString.lineRange(forLineIndex: line)
             guard characterRange.location != NSNotFound else { continue }
             let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange, actualCharacterRange: nil)
@@ -224,7 +283,8 @@ final class LineHighlightTextView: NSTextView {
         let textOrigin = textContainerOrigin
         let visibleBounds = enclosingScrollView?.contentView.bounds ?? visibleRect
         DiffPalette.deletionMarker.setFill()
-        for marker in deletionMarkers {
+        let visibleLines = visibleDocumentLines()
+        for marker in deletionMarkers where visibleLines.contains(marker.line) {
             if marker.kind != .inline {
                 guard let boundaryY = deletionBoundaryY(
                     for: marker,

@@ -38,14 +38,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AppCommands {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        for controller in windowControllersByPath.values.sorted(by: { $0.folderURL.path < $1.folderURL.path }) {
-            guard let window = controller.window,
-                  controller.mainViewController.confirmClose(window: window) else {
-                return .terminateCancel
+        let controllers = windowControllersByPath.values.sorted { $0.folderURL.path < $1.folderURL.path }
+        func confirmNext(_ index: Int) {
+            guard index < controllers.count else {
+                terminationApproved = true
+                sender.reply(toApplicationShouldTerminate: true)
+                return
+            }
+            guard let window = controllers[index].window else { confirmNext(index + 1); return }
+            controllers[index].mainViewController.requestClose(window: window) { approved in
+                if approved { confirmNext(index + 1) }
+                else { sender.reply(toApplicationShouldTerminate: false) }
             }
         }
-        terminationApproved = true
-        return .terminateNow
+        DispatchQueue.main.async { confirmNext(0) }
+        return .terminateLater
     }
 
     func openFolder(_ sender: Any?) {
@@ -69,6 +76,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AppCommands {
     func saveDocument(_ sender: Any?) {
         activeMainController?.saveDocument(sender)
     }
+
+    func findText(_ sender: Any?) { activeMainController?.findText(sender) }
+    func findNext(_ sender: Any?) { activeMainController?.findNext(sender) }
+    func findPrevious(_ sender: Any?) { activeMainController?.findPrevious(sender) }
+    func replaceText(_ sender: Any?) { activeMainController?.replaceText(sender) }
 
     func toggleWordWrap(_ sender: Any?) {
         activeMainController?.toggleWordWrap(sender)
@@ -192,6 +204,18 @@ enum MainMenu {
         let quickOpenItem = editMenu.addItem(withTitle: "Quick Open...", action: #selector(AppCommands.quickOpen(_:)), keyEquivalent: "t")
         quickOpenItem.target = appDelegate
 
+        editMenu.addItem(.separator())
+        for (title, action, key, modifiers) in [
+            ("Find…", #selector(AppCommands.findText(_:)), "f", NSEvent.ModifierFlags.command),
+            ("Find Next", #selector(AppCommands.findNext(_:)), "g", NSEvent.ModifierFlags.command),
+            ("Find Previous", #selector(AppCommands.findPrevious(_:)), "g", NSEvent.ModifierFlags([.command, .shift])),
+            ("Replace…", #selector(AppCommands.replaceText(_:)), "f", NSEvent.ModifierFlags([.command, .option]))
+        ] {
+            let item = editMenu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            item.target = appDelegate
+        }
+
         let viewItem = NSMenuItem()
         mainMenu.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
@@ -251,6 +275,10 @@ enum MainMenu {
 }
 
 @objc protocol AppCommands {
+    func findText(_ sender: Any?)
+    func findNext(_ sender: Any?)
+    func findPrevious(_ sender: Any?)
+    func replaceText(_ sender: Any?)
     func openFolder(_ sender: Any?)
     func saveDocument(_ sender: Any?)
     func toggleWordWrap(_ sender: Any?)
@@ -298,7 +326,10 @@ final class WindowController: NSWindowController, NSWindowDelegate {
         if (NSApp.delegate as? AppDelegate)?.terminationApproved == true {
             return true
         }
-        return mainViewController.confirmClose(window: sender)
+        mainViewController.requestClose(window: sender) { approved in
+            if approved { sender.close() }
+        }
+        return false
     }
 }
 
@@ -310,6 +341,10 @@ final class MainViewController: NSSplitViewController, AppCommands {
         qos: .userInitiated,
         attributes: .concurrent
     )
+    private let repositoryOperationQueue = DispatchQueue(label: "com.diffedit.repository-operations", qos: .userInitiated)
+    private var commitOverlay: NSView?
+    private var isCommitting = false
+
     private var repository: Repository?
     private var quickOpenController: QuickOpenController?
     private var activationRefreshGeneration = 0
@@ -352,38 +387,58 @@ final class MainViewController: NSSplitViewController, AppCommands {
     }
 
     func saveDocument(_ sender: Any?) {
-        do {
-            try editor.saveCurrentFile()
-        } catch EditorFileError.cancelled {
-            return
-        } catch {
-            presentError(error, title: "Couldn’t Save File")
+        guard !isCommitting else { return }
+        editor.saveCurrentFileAsync { [weak self] result in
+            if case let .failure(error) = result {
+                if case EditorFileError.cancelled = error { return }
+                self?.presentError(error, title: "Couldn’t Save File")
+            }
         }
     }
 
+    func findText(_ sender: Any?) { guard !isCommitting else { return }; editor.showSearch(replacing: false) }
+    func findNext(_ sender: Any?) { guard !isCommitting else { return }; editor.findMatch(backwards: false) }
+    func findPrevious(_ sender: Any?) { guard !isCommitting else { return }; editor.findMatch(backwards: true) }
+    func replaceText(_ sender: Any?) { guard !isCommitting else { return }; editor.showSearch(replacing: true) }
+
     func toggleWordWrap(_ sender: Any?) {
+        guard !isCommitting else { return }
         editor.toggleWordWrap()
     }
 
     func increaseFontSize(_ sender: Any?) {
+        guard !isCommitting else { return }
         editor.adjustFontSize(by: 1)
     }
 
     func decreaseFontSize(_ sender: Any?) {
+        guard !isCommitting else { return }
         editor.adjustFontSize(by: -1)
     }
 
     func quickOpen(_ sender: Any?) {
+        guard !isCommitting else { return }
         guard let repository else { return }
-        let files = repository.allFiles()
-        guard !files.isEmpty else { return }
-        let controller = QuickOpenController(files: files, onClose: { [weak self] in
+        if let controller = quickOpenController {
+            controller.showWindow(nil)
+            return
+        }
+        let controller = QuickOpenController(files: [], onClose: { [weak self] in
             self?.quickOpenController = nil
         }) { [weak self] file in
             guard let self else { return }
             self.openFile(relativePath: file.relativePath, url: file.url)
         }
         quickOpenController = controller
+        activationRefreshQueue.async { [weak self, weak controller] in
+            let files = repository.allFiles()
+            DispatchQueue.main.async { [weak self, weak controller] in
+                guard let self, let controller,
+                      self.repository === repository,
+                      self.quickOpenController === controller else { return }
+                controller.setFiles(files)
+            }
+        }
         if let window = view.window {
             controller.show(relativeTo: window)
         } else {
@@ -392,23 +447,28 @@ final class MainViewController: NSSplitViewController, AppCommands {
     }
 
     func previousParagraph(_ sender: Any?) {
+        guard !isCommitting else { return }
         editor.jumpParagraph(up: true)
     }
 
     func nextParagraph(_ sender: Any?) {
+        guard !isCommitting else { return }
         editor.jumpParagraph(up: false)
     }
 
     func previousChange(_ sender: Any?) {
+        guard !isCommitting else { return }
         navigateChange(.previous)
     }
 
     func nextChange(_ sender: Any?) {
+        guard !isCommitting else { return }
         navigateChange(.next)
     }
 
-    func confirmClose(window: NSWindow) -> Bool {
-        guard editor.hasUnsavedChanges else { return true }
+    func requestClose(window: NSWindow, completion: @escaping (Bool) -> Void) {
+        guard !isCommitting, !editor.isSaving else { completion(false); return }
+        guard editor.hasUnsavedChanges else { completion(true); return }
         let count = editor.unsavedFileCount
         let alert = NSAlert()
         alert.messageText = count == 1 ? "Save changes to 1 file?" : "Save changes to \(count) files?"
@@ -418,28 +478,37 @@ final class MainViewController: NSSplitViewController, AppCommands {
         alert.addButton(withTitle: "Don't Save")
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            do {
-                try editor.saveAllFiles()
-                return true
-            } catch EditorFileError.cancelled {
-                return false
-            } catch {
-                presentError(error, title: "Couldn’t Save All Files")
-                return false
+            editor.saveAllFilesAsync { [weak self] result in
+                switch result {
+                case .success:
+                    // Edits made while saving must not disappear on close.
+                    completion(self?.editor.hasUnsavedChanges == false)
+                case let .failure(error):
+                    if case EditorFileError.cancelled = error {} else {
+                        self?.presentError(error, title: "Couldn’t Save All Files")
+                    }
+                    completion(false)
+                }
             }
+        } else {
+            completion(response != .alertSecondButtonReturn)
         }
-        if response == .alertSecondButtonReturn {
-            return false
-        }
-        return true
     }
 
     func refreshRepositoryStatus() {
+        guard !isCommitting else { return }
         invalidateActivationRefresh()
-        repository?.refreshStatus()
-        if let repository {
-            sidebar.setCurrentBranchName(repository.currentBranchName)
-            sidebar.load(root: repository.makeTree())
+        guard let repository else { return }
+        let generation = activationRefreshGeneration
+        activationRefreshQueue.async { [weak self] in
+            let snapshot = repository.statusSnapshot()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.repository === repository,
+                      self.activationRefreshGeneration == generation else { return }
+                repository.apply(snapshot)
+                self.sidebar.setCurrentBranchName(snapshot.branchName)
+                self.sidebar.load(root: snapshot.tree, preservingSelection: self.editor.currentDocumentPath)
+            }
         }
     }
 
@@ -449,7 +518,7 @@ final class MainViewController: NSSplitViewController, AppCommands {
     }
 
     func refreshAfterBecomingKey() {
-        guard let repository else { return }
+        guard !isCommitting, let repository else { return }
         invalidateActivationRefresh()
         let generation = activationRefreshGeneration
         let fileRequest = editor.foregroundFileRefreshRequest()
@@ -523,28 +592,24 @@ final class MainViewController: NSSplitViewController, AppCommands {
     }
 
     @discardableResult
-    private func openFile(relativePath: String, url: URL) -> Bool {
-        guard let repository else { return false }
+    private func openFile(relativePath: String, url: URL, completion: (() -> Void)? = nil) -> Bool {
+        guard let repository, !isCommitting else { return false }
         invalidateActivationRefresh()
-        if editor.isEditing(relativePath: relativePath) {
-            sidebar.selectFile(relativePath: relativePath)
-            return true
+        editor.openAsync(file: url, relativePath: relativePath, repository: repository, onSaved: { [weak self] in
+            self?.refreshRepositoryStatus()
+        }) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(true):
+                self.sidebar.selectFile(relativePath: relativePath)
+                completion?()
+            case .success(false):
+                if let path = self.editor.currentDocumentPath { self.sidebar.selectFile(relativePath: path) }
+            case let .failure(error):
+                self.presentError(error, title: "Couldn’t Open File")
+            }
         }
-        do {
-            guard try editor.open(file: url, relativePath: relativePath, repository: repository, onSaved: { [weak self] in
-                self?.invalidateActivationRefresh()
-                self?.repository?.refreshStatus()
-                if let repository = self?.repository {
-                    self?.sidebar.setCurrentBranchName(repository.currentBranchName)
-                    self?.sidebar.load(root: repository.makeTree(), preservingSelection: relativePath)
-                }
-            }) else { return false }
-            sidebar.selectFile(relativePath: relativePath)
-            return true
-        } catch {
-            presentError(error, title: "Couldn’t Open File")
-            return false
-        }
+        return true
     }
 
     private func navigateChange(_ direction: ChangeNavigationDirection) {
@@ -568,12 +633,13 @@ final class MainViewController: NSSplitViewController, AppCommands {
             direction: direction
         ), let targetFile = changedFiles.first(where: { $0.relativePath == targetPath }) else { return }
 
-        guard openFile(relativePath: targetPath, url: targetFile.url) else { return }
-        _ = editor.navigateToEdgeChange(direction, animated: targetPath == previousPath)
+        _ = openFile(relativePath: targetPath, url: targetFile.url) { [weak self] in
+            _ = self?.editor.navigateToEdgeChange(direction, animated: targetPath == previousPath)
+        }
     }
 
     private func stageSelectedChanges() {
-        guard let repository else { return }
+        guard !isCommitting, let repository else { return }
         invalidateActivationRefresh()
         do {
             try editor.stageSelectedChanges(using: repository)
@@ -587,31 +653,86 @@ final class MainViewController: NSSplitViewController, AppCommands {
     }
 
     private func commit(message: String) {
-        guard let repository else { return }
-        invalidateActivationRefresh()
-        do {
-            guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw RepositoryError.emptyCommitMessage
-            }
-            let representedPaths = Set(repository.makeTree().filesInDisplayOrder.map(\.relativePath))
-            let invisibleStagedPaths = try repository.invisibleStagedPaths(representedUIPaths: representedPaths)
-            guard invisibleStagedPaths.isEmpty else {
-                throw RepositoryError.invisibleStagedChanges(invisibleStagedPaths)
-            }
-            if editor.hasStageableChanges {
-                try editor.stageSelectedChanges(using: repository)
-            }
-            let output = try repository.commit(message: message)
-            repository.refreshStatus()
-            sidebar.setCurrentBranchName(repository.currentBranchName)
-            editor.refreshCommittedBases(using: repository)
-            sidebar.load(root: repository.makeTree())
-            sidebar.clearCommitMessage()
-            let summary = output.split(separator: "\n").first.map(String.init) ?? "Commit created"
-            sidebar.setSourceControlStatus(summary)
-        } catch {
-            presentError(error, title: "Couldn’t Commit")
+        guard let repository, !isCommitting else { return }
+        guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            presentError(RepositoryError.emptyCommitMessage, title: "Couldn’t Commit")
+            return
         }
+        invalidateActivationRefresh()
+        let captured = editor.commitSnapshot()
+        setCommitBusy(true)
+        repositoryOperationQueue.async { [weak self] in
+            let result = Result { () -> (String, RepositoryStatusSnapshot, [String: String]) in
+                let representedPaths = Set(repository.makeTree().filesInDisplayOrder.map(\.relativePath))
+                let invisible = try repository.invisibleStagedPaths(representedUIPaths: representedPaths)
+                guard invisible.isEmpty else { throw RepositoryError.invisibleStagedChanges(invisible) }
+                if let buffer = captured.buffer {
+                    let plan = DiffEngine.selectiveStagingPlan(base: buffer.baseText, current: buffer.text)
+                    if !plan.selectableChanges.isEmpty {
+                        let selected = captured.selected.intersection(plan.selectableChanges)
+                            .union(plan.selectableChanges.subtracting(captured.available))
+                        try repository.stage(text: plan.text(selectedChanges: selected), relativePath: buffer.relativePath)
+                    }
+                }
+                let output = try repository.commit(message: message)
+                let snapshot = repository.statusSnapshot()
+                var bases: [String: String] = [:]
+                for path in captured.paths { bases[path] = repository.committedText(relativePath: path) ?? "" }
+                return (output, snapshot, bases)
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.invalidateActivationRefresh()
+                self.setCommitBusy(false)
+                switch result {
+                case let .success((output, snapshot, bases)):
+                    repository.apply(snapshot)
+                    self.editor.applyCommittedBases(bases)
+                    self.sidebar.setCurrentBranchName(snapshot.branchName)
+                    self.sidebar.load(root: snapshot.tree, preservingSelection: self.editor.currentDocumentPath)
+                    self.sidebar.clearCommitMessage()
+                    self.sidebar.setSourceControlStatus(output.split(separator: "\n").first.map(String.init) ?? "Commit created")
+                case let .failure(error):
+                    self.refreshRepositoryStatus()
+                    self.presentError(error, title: "Couldn’t Commit")
+                }
+            }
+        }
+    }
+
+    private func setCommitBusy(_ busy: Bool) {
+        isCommitting = busy
+        editor.setOperationBusy(busy)
+        if !busy {
+            commitOverlay?.removeFromSuperview()
+            commitOverlay = nil
+            return
+        }
+        let overlay = NSVisualEffectView()
+        overlay.material = .sheet
+        overlay.blendingMode = .withinWindow
+        overlay.state = .active
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .regular
+        spinner.startAnimation(nil)
+        let label = NSTextField(labelWithString: "Committing…")
+        let content = NSStackView(views: [spinner, label])
+        content.orientation = .vertical
+        content.spacing = 12
+        content.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(content)
+        view.addSubview(overlay)
+        NSLayoutConstraint.activate([
+            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            overlay.topAnchor.constraint(equalTo: view.topAnchor),
+            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            content.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            content.centerYAnchor.constraint(equalTo: overlay.centerYAnchor)
+        ])
+        commitOverlay = overlay
     }
 
     private func presentError(_ error: Error, title: String) {

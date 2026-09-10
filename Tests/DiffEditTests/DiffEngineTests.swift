@@ -4,6 +4,39 @@ import XCTest
 @testable import DiffEdit
 
 final class DiffEngineTests: XCTestCase {
+    func testBlankGapReductionOnlyMarksRemovalOfTheEntireGap() {
+        for newline in ["\n", "\r\n"] {
+            let base = "one" + String(repeating: newline, count: 5) + "two"
+            let reduced = DiffEngine.diff(base: base, current: "one" + String(repeating: newline, count: 3) + "two")
+            XCTAssertTrue(reduced.currentDeletionMarkers.isEmpty)
+            let removed = DiffEngine.diff(base: base, current: "one" + newline + "two")
+            XCTAssertEqual(removed.currentDeletionMarkers.map(\.kind), [.lineBoundaryBefore])
+        }
+        XCTAssertTrue(DiffEngine.diff(base: "one\n\n\n\n", current: "one\n\n").currentDeletionMarkers.isEmpty)
+        XCTAssertFalse(DiffEngine.diff(base: "one\n\n\n", current: "one\n").currentDeletionMarkers.isEmpty)
+        XCTAssertFalse(DiffEngine.diff(base: "one\nremoved\n\ntwo", current: "one\n\ntwo").currentDeletionMarkers.isEmpty)
+    }
+
+    func testInsertedSentenceDoesNotMisalignFollowingWordEdit() {
+        let original = "For example, CowPilot allows users to pause the agent, reject proposed actions, or take over part of a web task.\n"
+        let edited = original.replacingOccurrences(of: "CowPilot", with: "CoPilot")
+        let base = "One common approach is to let users directly intervene.\n" + original + "Unchanged ending.\n"
+        let prefix = "Conversational refinement lets users provide follow-up instructions.\nBeyond conversation, one common approach is to let users directly intervene.\n"
+        let current = prefix + edited + "Unchanged ending.\n"
+        let result = DiffEngine.diff(base: base, current: current)
+        let sentenceRange = NSRange(location: (prefix as NSString).length, length: (edited as NSString).length)
+        let sentenceHighlights = result.insertedWordRanges.filter { NSIntersectionRange($0, sentenceRange).length > 0 }
+        XCTAssertEqual(highlightedStrings(sentenceHighlights, in: current), ["CoPilot"])
+        XCTAssertEqual(result.currentToBaseLine[2], 1)
+    }
+
+    func testDeletionBarsSeparatedOnlyByBlankSpaceAreCoalesced() {
+        let merged = DiffEngine.diff(base: "start\nremoved one\n\nremoved two\nend\n", current: "start\n\nend\n")
+        XCTAssertEqual(merged.currentDeletionMarkers.map(\.line), [1])
+        let separate = DiffEngine.diff(base: "start\nremoved one\nkept\nremoved two\nend\n", current: "start\nkept\nend\n")
+        XCTAssertEqual(separate.currentDeletionMarkers.map(\.line), [1, 2])
+    }
+
     func testUnchangedTextProducesNoHighlights() {
         let result = DiffEngine.diff(base: "one\ntwo\n", current: "one\ntwo\n")
 
@@ -756,6 +789,275 @@ final class TextSelectionSnapshotTests: XCTestCase {
 }
 
 final class WorkspaceModeUITests: XCTestCase {
+    func testTypingMovesDeletionAnchorsImmediatelyAndEnterKeepsLineShading() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runGitForUITest(["init", "-q"], in: directory)
+        try runGitForUITest(["config", "user.name", "DiffEdit Tests"], in: directory)
+        try runGitForUITest(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        let file = directory.appendingPathComponent("markers.txt")
+        try "alpha removed beta\nnext\n".write(to: file, atomically: true, encoding: .utf8)
+        try runGitForUITest(["add", "."], in: directory)
+        try runGitForUITest(["commit", "-qm", "initial"], in: directory)
+        try "alpha beta\nnext\n".write(to: file, atomically: true, encoding: .utf8)
+        let editor = EditorViewController()
+        let window = NSWindow(contentViewController: editor)
+        defer { window.orderOut(nil) }
+        window.setContentSize(NSSize(width: 900, height: 700))
+        XCTAssertTrue(try editor.open(file: file, relativePath: "markers.txt", repository: Repository(rootURL: directory), onSaved: {}))
+        let text = try XCTUnwrap(descendants(of: editor.view, matching: LineHighlightTextView.self).first(where: \.isEditable))
+        XCTAssertEqual(text.deletionMarkers.first?.column, 6)
+        text.insertText("X", replacementRange: NSRange(location: 0, length: 0))
+        XCTAssertEqual(text.deletionMarkers.first?.column, 7)
+        text.insertText("Y", replacementRange: NSRange(location: 11, length: 0))
+        XCTAssertEqual(text.deletionMarkers.first?.column, 7)
+        text.insertText("\n", replacementRange: NSRange(location: 3, length: 0))
+        XCTAssertEqual(text.deletionMarkers.first?.line, 1)
+        XCTAssertEqual(text.deletionMarkers.first?.column, 4)
+        XCTAssertTrue(text.fullLineHighlightedLines.isSuperset(of: [0, 1]))
+    }
+
+    func testTypingUndoGroupsWordsAndBreaksAtCursorMovement() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("undo.txt")
+        try "".write(to: file, atomically: true, encoding: .utf8)
+        let editor = EditorViewController()
+        let window = NSWindow(contentViewController: editor)
+        defer { window.orderOut(nil) }
+        window.setContentSize(NSSize(width: 900, height: 700))
+        XCTAssertTrue(try editor.open(file: file, relativePath: "undo.txt", repository: Repository(rootURL: directory), onSaved: {}))
+        let text = try XCTUnwrap(descendants(of: editor.view, matching: LineHighlightTextView.self).first(where: \.isEditable))
+        let undo = try XCTUnwrap(text.undoManager)
+        window.makeFirstResponder(text)
+        func type(_ string: String) {
+            for character in string {
+                text.insertText(String(character), replacementRange: text.selectedRange())
+                RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            }
+        }
+        type("hel")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        type("lo world")
+        undo.undo()
+        XCTAssertEqual(text.string, "hello ")
+        undo.undo()
+        XCTAssertEqual(text.string, "")
+        undo.redo()
+        undo.redo()
+        XCTAssertEqual(text.string, "hello world")
+        let arrow = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "\u{F702}", charactersIgnoringModifiers: "\u{F702}", isARepeat: false, keyCode: 123))
+        text.keyDown(with: arrow)
+        type("xy")
+        undo.undo()
+        XCTAssertEqual(text.string, "hello world")
+        type("ab")
+        let beforeFocusChange = text.string
+        window.makeFirstResponder(nil)
+        window.makeFirstResponder(text)
+        type("cd")
+        undo.undo()
+        XCTAssertEqual(text.string, beforeFocusChange)
+    }
+
+    func testAsyncSavePreservesNewerEditsAndOpenDiscardsStaleResults() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("first.txt")
+        let other = directory.appendingPathComponent("second.txt")
+        try "original\n".write(to: file, atomically: true, encoding: .utf8)
+        try "second\n".write(to: other, atomically: true, encoding: .utf8)
+        let editor = EditorViewController()
+        let window = NSWindow(contentViewController: editor)
+        defer { window.orderOut(nil) }
+        window.setContentSize(NSSize(width: 900, height: 700))
+        let repository = Repository(rootURL: directory)
+        XCTAssertTrue(try editor.open(file: file, relativePath: "first.txt", repository: repository, onSaved: {}))
+        let text = try XCTUnwrap(descendants(of: editor.view, matching: LineHighlightTextView.self).first(where: \.isEditable))
+        text.insertText("saved\n", replacementRange: NSRange(location: 0, length: (text.string as NSString).length))
+        let saved = expectation(description: "background save")
+        editor.saveCurrentFileAsync { result in
+            if case let .failure(error) = result { XCTFail(error.localizedDescription) }
+            saved.fulfill()
+        }
+        XCTAssertTrue(editor.isSaving)
+        text.insertText("newer\n", replacementRange: NSRange(location: (text.string as NSString).length, length: 0))
+        wait(for: [saved], timeout: 5)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "saved\n")
+        XCTAssertEqual(text.string, "saved\nnewer\n")
+        XCTAssertTrue(editor.hasUnsavedChanges)
+        let queued = expectation(description: "repeated saves")
+        queued.expectedFulfillmentCount = 2
+        editor.saveCurrentFileAsync { _ in queued.fulfill() }
+        text.insertText("latest\n", replacementRange: NSRange(location: (text.string as NSString).length, length: 0))
+        editor.saveCurrentFileAsync { _ in queued.fulfill() }
+        wait(for: [queued], timeout: 5)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "saved\nnewer\nlatest\n")
+        XCTAssertFalse(editor.hasUnsavedChanges)
+        let opened = expectation(description: "latest open")
+        editor.openAsync(file: file, relativePath: "first.txt", repository: repository, onSaved: {}) { _ in XCTFail("Stale open applied") }
+        editor.openAsync(file: other, relativePath: "second.txt", repository: repository, onSaved: {}) { result in
+            if case let .failure(error) = result { XCTFail(error.localizedDescription) }
+            opened.fulfill()
+        }
+        wait(for: [opened], timeout: 5)
+        XCTAssertEqual(editor.currentDocumentPath, "second.txt")
+        XCTAssertEqual(text.string, "second\n")
+        text.insertText("local\n", replacementRange: NSRange(location: 0, length: (text.string as NSString).length))
+        try "external\n".write(to: other, atomically: true, encoding: .utf8)
+        editor.resolveExternalFileConflict = { _ in
+            XCTAssertTrue(Thread.isMainThread)
+            return .cancel
+        }
+        let cancelled = expectation(description: "external conflict stays on main thread")
+        editor.saveCurrentFileAsync { result in
+            if case .success = result { XCTFail("Conflicting save should be cancelled") }
+            cancelled.fulfill()
+        }
+        wait(for: [cancelled], timeout: 5)
+        XCTAssertEqual(try String(contentsOf: other, encoding: .utf8), "external\n")
+        XCTAssertEqual(text.string, "local\n")
+    }
+
+    func testCommitRunsBehindOverlayAndCommitsCapturedBuffer() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runGitForUITest(["init", "-q"], in: directory)
+        try runGitForUITest(["config", "user.name", "DiffEdit Tests"], in: directory)
+        try runGitForUITest(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
+        let file = directory.appendingPathComponent("example.txt")
+        try "old\n".write(to: file, atomically: true, encoding: .utf8)
+        try runGitForUITest(["add", "."], in: directory)
+        try runGitForUITest(["commit", "-qm", "initial"], in: directory)
+        let main = MainViewController()
+        let window = NSWindow(contentViewController: main)
+        defer { window.orderOut(nil) }
+        window.setContentSize(NSSize(width: 900, height: 700))
+        main.loadFolder(directory)
+        let outline = try XCTUnwrap(descendants(of: main.view, matching: NSOutlineView.self).first)
+        wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in outline.numberOfRows > 0 }, object: nil)], timeout: 5)
+        let editor = try XCTUnwrap(main.splitViewItems.last?.viewController as? EditorViewController)
+        let sidebar = try XCTUnwrap(main.splitViewItems.first?.viewController as? SidebarViewController)
+        XCTAssertTrue(try editor.open(file: file, relativePath: "example.txt", repository: Repository(rootURL: directory), onSaved: {}))
+        let text = try XCTUnwrap(descendants(of: editor.view, matching: LineHighlightTextView.self).first(where: \.isEditable))
+        text.insertText("committed buffer\n", replacementRange: NSRange(location: 0, length: (text.string as NSString).length))
+        sidebar.onCommit?("background commit")
+        XCTAssertFalse(text.isEditable)
+        XCTAssertTrue(descendants(of: main.view, matching: NSTextField.self).contains { $0.stringValue == "Committing…" })
+        wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in text.isEditable }, object: nil)], timeout: 10)
+        XCTAssertFalse(descendants(of: main.view, matching: NSTextField.self).contains { $0.stringValue == "Committing…" })
+        XCTAssertEqual(Repository(rootURL: directory).committedText(relativePath: "example.txt"), "committed buffer\n")
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "old\n")
+    }
+
+    func testQuickOpenOnlyAppliesLatestBackgroundFilter() throws {
+        var opened: String?
+        let controller = QuickOpenController(files: [], onClose: {}) { opened = $0.relativePath }
+        let view = try XCTUnwrap(controller.window?.contentView)
+        let field = try XCTUnwrap(descendants(of: view, matching: NSSearchField.self).first)
+        let table = try XCTUnwrap(descendants(of: view, matching: NSTableView.self).first)
+        controller.setFiles(["alpha.txt", "beta.txt", "beta.swift"].map {
+            FileReference(relativePath: $0, url: URL(fileURLWithPath: "/tmp/" + $0))
+        })
+        field.stringValue = "alpha"
+        controller.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+        field.stringValue = "beta swift"
+        controller.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+        controller.acceptSelection()
+        XCTAssertNil(opened)
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            table.numberOfRows == 1 && table.selectedRow == 0
+        }, object: nil)
+        wait(for: [ready], timeout: 3)
+        controller.acceptSelection()
+        XCTAssertEqual(opened, "beta.swift")
+    }
+
+    func testTypingAndHighlightRefreshPreserveMultilineText() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("multiline.txt")
+        let original = "first line\n\nsecond line\nthird line\n"
+        try original.write(to: file, atomically: true, encoding: .utf8)
+        let editor = EditorViewController()
+        let window = NSWindow(contentViewController: editor)
+        defer { window.orderOut(nil) }
+        window.setContentSize(NSSize(width: 900, height: 700))
+        XCTAssertTrue(try editor.open(file: file, relativePath: "multiline.txt", repository: Repository(rootURL: directory), onSaved: {}))
+        let text = try XCTUnwrap(descendants(of: editor.view, matching: LineHighlightTextView.self).first(where: \.isEditable))
+        window.makeFirstResponder(text)
+        text.setSelectedRange(NSRange(location: 6, length: 0))
+        text.insertText("changed ", replacementRange: text.selectedRange())
+        editor.adjustFontSize(by: 0)
+        XCTAssertEqual(text.string, "first changed line\n\nsecond line\nthird line\n")
+        XCTAssertFalse(text.isFieldEditor)
+        let first = try XCTUnwrap(text.logicalLineRect(for: 0))
+        let third = try XCTUnwrap(text.logicalLineRect(for: 2))
+        XCTAssertGreaterThan(third.minY, first.maxY)
+        text.insertNewline(nil)
+        editor.adjustFontSize(by: 0)
+        XCTAssertEqual(text.string, "first changed \nline\n\nsecond line\nthird line\n")
+        try editor.saveCurrentFile()
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), text.string)
+    }
+
+    func testSearchWrapsAndReplaceIsUndoableWithoutResizingPastPane() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("search.txt")
+        try "alpha beta ALPHA".write(to: file, atomically: true, encoding: .utf8)
+        let editor = EditorViewController()
+        let window = NSWindow(contentViewController: editor)
+        defer { window.orderOut(nil) }
+        window.setContentSize(NSSize(width: 900, height: 700))
+        XCTAssertTrue(try editor.open(file: file, relativePath: "search.txt", repository: Repository(rootURL: directory), onSaved: {}))
+        editor.view.layoutSubtreeIfNeeded()
+        let split = try XCTUnwrap(descendants(of: editor.view, matching: EditorSplitView.self).first)
+        let text = try XCTUnwrap(descendants(of: editor.view, matching: LineHighlightTextView.self).first(where: \.isEditable))
+        let pastHeight = split.subviews[0].frame.height
+        let initialHeight = split.subviews[1].frame.height
+        editor.showSearch(replacing: false)
+        let fields = descendants(of: editor.view, matching: NSTextField.self)
+        let find = try XCTUnwrap(fields.first { $0.identifier?.rawValue == "findField" })
+        let replace = try XCTUnwrap(fields.first { $0.identifier?.rawValue == "replacementField" })
+        XCTAssertFalse(find.isHiddenOrHasHiddenAncestor)
+        XCTAssertTrue(replace.isHiddenOrHasHiddenAncestor)
+        XCTAssertEqual(split.subviews[0].frame.height, pastHeight, accuracy: 1)
+        XCTAssertLessThan(split.subviews[1].frame.height, initialHeight)
+        find.stringValue = "alpha"
+        editor.findMatch(backwards: false)
+        XCTAssertEqual(text.selectedRange(), NSRange(location: 0, length: 5))
+        editor.findMatch(backwards: false)
+        XCTAssertEqual(text.selectedRange(), NSRange(location: 11, length: 5))
+        editor.findMatch(backwards: false)
+        XCTAssertEqual(text.selectedRange().location, 0)
+        editor.findMatch(backwards: true)
+        XCTAssertEqual(text.selectedRange().location, 11)
+        let searchHeight = split.subviews[1].frame.height
+        editor.showSearch(replacing: true)
+        XCTAssertFalse(replace.isHiddenOrHasHiddenAncestor)
+        XCTAssertEqual(split.subviews[0].frame.height, pastHeight, accuracy: 1)
+        XCTAssertLessThan(split.subviews[1].frame.height, searchHeight)
+        replace.stringValue = "omega"
+        let button = try XCTUnwrap(descendants(of: editor.view, matching: NSButton.self).first { $0.title == "Replace All" })
+        let undo = try XCTUnwrap(text.undoManager)
+        undo.beginUndoGrouping()
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(button.action), to: button.target, from: button))
+        undo.endUndoGrouping()
+        XCTAssertEqual(text.string, "omega beta omega")
+        XCTAssertTrue(undo.canUndo)
+        undo.undo()
+        XCTAssertEqual(text.string, "alpha beta ALPHA")
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "alpha beta ALPHA")
+    }
+
     func testEditModeKeepsMatchingGutterWidthsAndStagingHasItsOwnView() throws {
         let main = MainViewController()
         _ = main.view
@@ -778,13 +1080,13 @@ final class WorkspaceModeUITests: XCTestCase {
         XCTAssertFalse(modeControl.isDescendant(of: editorContainer))
         let stagingView = try XCTUnwrap(descendants(of: editorContainer, matching: StagingDiffView.self).first)
         XCTAssertTrue(stagingView.isHidden)
+        XCTAssertTrue(gutters.allSatisfy(\.isHiddenOrHasHiddenAncestor))
 
         modeControl.selectedSegment = WorkspaceMode.staging.rawValue
         _ = modeControl.sendAction(modeControl.action, to: modeControl.target)
         main.view.layoutSubtreeIfNeeded()
 
-        XCTAssertFalse(stagingView.isHidden)
-        XCTAssertEqual(stagingView.frame.width, stagingView.superview?.bounds.width ?? 0, accuracy: 1)
+        XCTAssertTrue(stagingView.isHidden)
         XCTAssertTrue(gutters.allSatisfy(\.isHiddenOrHasHiddenAncestor))
     }
 
@@ -886,7 +1188,6 @@ final class WorkspaceModeUITests: XCTestCase {
         let persistedHeight: CGFloat = 180
         splitView.setPosition(persistedHeight, ofDividerAt: 0)
         let snappedPersistedHeight = committedRow.frame.height
-        splitView.onDividerDragCompleted?()
         XCTAssertEqual(defaults.double(forKey: defaultsKey), snappedPersistedHeight, accuracy: 1)
         let snappedContentHeight = snappedPersistedHeight - committedTextView.textContainerInset.height * 2
         XCTAssertEqual(
@@ -904,8 +1205,26 @@ final class WorkspaceModeUITests: XCTestCase {
         restoredEditor.loadView()
         restoredEditor.view.frame = editor.view.frame
         restoredEditor.view.layoutSubtreeIfNeeded()
+        XCTAssertTrue(try restoredEditor.open(
+            file: fileURL,
+            relativePath: "example.txt",
+            repository: Repository(rootURL: directory),
+            onSaved: {}
+        ))
         let restoredSplit = try XCTUnwrap(descendants(of: restoredEditor.view, matching: EditorSplitView.self).first)
         XCTAssertEqual(restoredSplit.subviews[0].frame.height, snappedPersistedHeight, accuracy: 1)
+
+        let window = NSWindow(contentViewController: restoredEditor)
+        defer { window.orderOut(nil) }
+        window.setContentSize(NSSize(width: 1_180, height: 820))
+        window.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertEqual(restoredSplit.subviews[0].frame.height, snappedPersistedHeight, accuracy: 1)
+        restoredEditor.setMode(.staging)
+        window.contentView?.layoutSubtreeIfNeeded()
+        restoredEditor.setMode(.editing)
+        window.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertEqual(restoredSplit.subviews[0].frame.height, snappedPersistedHeight, accuracy: 1)
+        XCTAssertEqual(defaults.double(forKey: defaultsKey), snappedPersistedHeight, accuracy: 1)
     }
 
     func testStagingDiffColumnFillsWideViewport() throws {

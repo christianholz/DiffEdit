@@ -67,6 +67,11 @@ extension NSString {
             index = NSMaxRange(range)
             line += 1
         }
+        // EOF stays on the last logical line unless a newline terminates it.
+        if safeLocation == length, length > 0,
+           substring(with: NSRange(location: length - 1, length: 1)).rangeOfCharacter(from: .newlines) == nil {
+            return max(0, line - 1)
+        }
         return line
     }
 
