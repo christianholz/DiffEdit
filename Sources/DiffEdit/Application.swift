@@ -88,11 +88,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AppCommands, NSMenuIte
         if menuItem.action == #selector(AppCommands.restorePrevious(_:)) {
             return activeMainController?.canRestorePrevious == true
         }
+        if menuItem.action == #selector(AppCommands.toggleHighlightWhitespaceChanges(_:)) {
+            menuItem.state = activeMainController?.isHighlightWhitespaceChangesEnabled == true ? .on : .off
+        }
         return true
     }
 
     func toggleWordWrap(_ sender: Any?) {
         activeMainController?.toggleWordWrap(sender)
+    }
+
+    func toggleHighlightWhitespaceChanges(_ sender: Any?) {
+        activeMainController?.toggleHighlightWhitespaceChanges(sender)
     }
 
     func increaseFontSize(_ sender: Any?) {
@@ -237,6 +244,8 @@ enum MainMenu {
         let wrapItem = viewMenu.addItem(withTitle: "Toggle Word Wrap", action: #selector(AppCommands.toggleWordWrap(_:)), keyEquivalent: "w")
         wrapItem.keyEquivalentModifierMask = [.command, .option]
         wrapItem.target = appDelegate
+        let whitespaceItem = viewMenu.addItem(withTitle: "Highlight Whitespace Changes", action: #selector(AppCommands.toggleHighlightWhitespaceChanges(_:)), keyEquivalent: "")
+        whitespaceItem.target = appDelegate
         viewMenu.addItem(.separator())
         let biggerItem = viewMenu.addItem(withTitle: "Bigger", action: #selector(AppCommands.increaseFontSize(_:)), keyEquivalent: "+")
         biggerItem.target = appDelegate
@@ -306,6 +315,7 @@ enum MainMenu {
     func openFolder(_ sender: Any?)
     func saveDocument(_ sender: Any?)
     func toggleWordWrap(_ sender: Any?)
+    func toggleHighlightWhitespaceChanges(_ sender: Any?)
     func increaseFontSize(_ sender: Any?)
     func decreaseFontSize(_ sender: Any?)
     func quickOpen(_ sender: Any?)
@@ -430,6 +440,13 @@ final class MainViewController: NSSplitViewController, AppCommands {
     func toggleWordWrap(_ sender: Any?) {
         guard !isCommitting else { return }
         editor.toggleWordWrap()
+    }
+
+    var isHighlightWhitespaceChangesEnabled: Bool { editor.isHighlightWhitespaceChangesEnabled }
+
+    func toggleHighlightWhitespaceChanges(_ sender: Any?) {
+        guard !isCommitting else { return }
+        editor.toggleHighlightWhitespaceChanges()
     }
 
     func increaseFontSize(_ sender: Any?) {

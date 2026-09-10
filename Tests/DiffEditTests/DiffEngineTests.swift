@@ -176,6 +176,18 @@ final class DiffEngineTests: XCTestCase {
                 XCTAssertFalse(result.insertedWordRanges.contains { NSLocationInRange(space, $0) }, replacement)
             }
         }
+        for (base, current) in [("one\ttwo", "one    two"), ("one  two", "one    two")] {
+            let hidden = DiffEngine.visualDiff(base: base, current: current, highlightWhitespaceChanges: false)
+            XCTAssertTrue(hidden.insertedWordRanges.isEmpty)
+            XCTAssertTrue(hidden.deletedWordRanges.isEmpty)
+            XCTAssertTrue(hidden.currentDeletionMarkers.isEmpty)
+            XCTAssertTrue(hidden.currentTouchedLines.isEmpty)
+            XCTAssertTrue(hidden.baseTouchedLines.isEmpty)
+
+            let visible = DiffEngine.visualDiff(base: base, current: current, highlightWhitespaceChanges: true)
+            XCTAssertFalse(visible.insertedWordRanges.isEmpty)
+            XCTAssertFalse(visible.currentTouchedLines.isEmpty)
+        }
     }
 
     func testPunctuationEditOnlyHighlightsChangedCharacter() {

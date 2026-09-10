@@ -237,6 +237,48 @@ enum ChangedFileNavigator {
 }
 
 enum DiffEngine {
+    static func visualDiff(base: String, current: String, highlightWhitespaceChanges: Bool) -> DiffResult {
+        var result = diff(base: base, current: current)
+        guard !highlightWhitespaceChanges else { return result }
+        let oldLines = base.splitKeepingEmptyLines()
+        let currentText = current as NSString
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        func hasVisibleText(_ text: String) -> Bool {
+            text.rangeOfCharacter(from: whitespace.inverted) != nil
+        }
+        func oldText(_ range: LineRange) -> String {
+            guard let line = oldLines[safe: range.line], NSMaxRange(range.range) <= (line as NSString).length else { return "" }
+            return (line as NSString).substring(with: range.range)
+        }
+        func currentSubstring(_ range: NSRange) -> String {
+            guard range.location >= 0, NSMaxRange(range) <= currentText.length else { return "" }
+            return currentText.substring(with: range)
+        }
+
+        let hiddenLinks = result.replacementLinks.filter {
+            !hasVisibleText(oldText($0.base)) && !hasVisibleText(currentSubstring($0.current))
+        }
+        let hiddenMarkerLocations = Set(hiddenLinks.compactMap { link -> LineColumn? in
+            guard link.current.length == 0 else { return nil }
+            let line = currentText.lineIndex(containing: link.current.location)
+            return LineColumn(line: line, column: link.current.location - currentText.lineStartOffset(forLineIndex: line))
+        })
+        result.insertedWordRanges.removeAll { !hasVisibleText(currentSubstring($0)) }
+        result.deletedWordRanges.removeAll { !hasVisibleText(oldText($0)) }
+        result.replacementLinks.removeAll { link in
+            hiddenLinks.contains { hidden in
+                hidden.current == link.current && hidden.base.line == link.base.line && hidden.base.range == link.base.range
+            }
+        }
+        result.currentDeletionMarkers.removeAll {
+            $0.kind == .inline && hiddenMarkerLocations.contains(LineColumn(line: $0.line, column: $0.column))
+        }
+        result.currentTouchedLines = Set(result.insertedWordRanges.map { currentText.lineIndex(containing: $0.location) })
+            .union(result.currentDeletionMarkers.map(\.line))
+        result.baseTouchedLines = Set(result.deletedWordRanges.map(\.line))
+        return result
+    }
+
     static func selectiveStagingPlan(base: String, current: String) -> SelectiveStagingPlan {
         let baseLines = base.splitKeepingEmptyLines()
         let currentLines = current.splitKeepingEmptyLines()

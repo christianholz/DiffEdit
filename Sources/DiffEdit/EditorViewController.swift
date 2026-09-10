@@ -21,6 +21,7 @@ enum WorkspaceMode: Int {
 
 final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitViewDelegate, NSTextFieldDelegate {
     static let committedPaneHeightDefaultsKey = "DiffEdit.committedPaneHeight"
+    static let highlightWhitespaceChangesDefaultsKey = "DiffEdit.highlightWhitespaceChanges"
 
     var onBufferedChangesChanged: ((Set<String>) -> Void)?
     var onStageSelectionAvailabilityChanged: ((Bool) -> Void)?
@@ -76,6 +77,7 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
     private var pendingImmediateHighlightRange: NSRange?
     private var fontSize: CGFloat = 13
     private var wordWrap = true
+    private var highlightWhitespaceChanges = UserDefaults.standard.bool(forKey: highlightWhitespaceChangesDefaultsKey)
     private var lastDiff = DiffResult.empty
     private var isApplyingHighlights = false
     private var committedVisibleBaseLines: [Int?] = []
@@ -791,6 +793,14 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         applyWrapping()
     }
 
+    var isHighlightWhitespaceChangesEnabled: Bool { highlightWhitespaceChanges }
+
+    func toggleHighlightWhitespaceChanges() {
+        highlightWhitespaceChanges.toggle()
+        UserDefaults.standard.set(highlightWhitespaceChanges, forKey: Self.highlightWhitespaceChangesDefaultsKey)
+        recomputeHighlights()
+    }
+
     var hasUnsavedChanges: Bool {
         persistCurrentBuffer()
         return !bufferedChangePaths.isEmpty
@@ -950,8 +960,12 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
             let base = self.baseText
             let current = self.textView.string
             let path = self.currentRelativePath
+            let highlightWhitespaceChanges = self.highlightWhitespaceChanges
             self.typingDiffQueue.async { [weak self] in
-                let result = DiffEngine.diff(base: base, current: current)
+                let result = DiffEngine.visualDiff(
+                    base: base, current: current,
+                    highlightWhitespaceChanges: highlightWhitespaceChanges
+                )
                 let plan = DiffEngine.selectiveStagingPlan(base: base, current: current)
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.diffGeneration == generation,
@@ -1003,7 +1017,10 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
             let baseLine = lastDiff.currentToBaseLine[currentLine] ?? currentLine
             let oldText = cachedBaseLines[safe: baseLine] ?? ""
             let newText = current.substring(with: currentRange)
-            let lineDiff = DiffEngine.diff(base: oldText, current: newText)
+            let lineDiff = DiffEngine.visualDiff(
+                base: oldText, current: newText,
+                highlightWhitespaceChanges: highlightWhitespaceChanges
+            )
             storage.removeAttribute(.backgroundColor, range: currentRange)
             for localRange in lineDiff.insertedWordRanges {
                 let range = NSRange(location: currentRange.location + localRange.location, length: localRange.length)
@@ -1143,7 +1160,10 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         pendingDiffWorkItem?.cancel()
         committedContextNeedsRefresh = true
         let workingText = textView.string
-        lastDiff = DiffEngine.diff(base: baseText, current: workingText)
+        lastDiff = DiffEngine.visualDiff(
+            base: baseText, current: workingText,
+            highlightWhitespaceChanges: highlightWhitespaceChanges
+        )
         if let currentRelativePath {
             let plan = DiffEngine.selectiveStagingPlan(base: baseText, current: workingText)
             preparedStagingPlan = (baseText, workingText, plan)
