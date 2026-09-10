@@ -1457,13 +1457,23 @@ final class EditorViewController: NSViewController, NSTextViewDelegate, NSSplitV
         let text = committedTextView.string as NSString
         layout.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: text.length))
         let offset = textView.selectedRange().location
-        if let link = lastDiff.replacementLinks.first(where: { NSLocationInRange(offset, $0.current) }),
+        let insertedSegment = lastDiff.insertedWordRanges.first(where: { NSLocationInRange(offset, $0) })
+        let replacementLink = lastDiff.replacementLinks.first(where: { NSLocationInRange(offset, $0.current) })
+            ?? insertedSegment.flatMap { segment in
+                lastDiff.replacementLinks.first(where: { NSIntersectionRange(segment, $0.current).length > 0 })
+            }
+        if let link = replacementLink,
            let line = committedVisibleBaseLines.firstIndex(where: { $0 == link.base.line }) {
+            // Word alignment can split a replacement at unchanged spaces even
+            // though its deleted words render as one consecutive red segment.
+            let deletedSegment = lastDiff.deletedWordRanges.first(where: {
+                $0.line == link.base.line && NSIntersectionRange($0.range, link.base.range).length > 0
+            })?.range ?? link.base.range
             let start = text.lineStartOffset(forLineIndex: line)
-            let range = NSRange(location: start + link.base.range.location, length: link.base.range.length)
+            let range = NSRange(location: start + deletedSegment.location, length: deletedSegment.length)
             if NSMaxRange(range) <= text.length {
                 layout.addTemporaryAttribute(.backgroundColor, value: DiffPalette.activeDeletedText, forCharacterRange: range)
-                committedTextView.caretMarker = CaretMarker(line: line, column: link.base.range.location)
+                committedTextView.caretMarker = CaretMarker(line: line, column: deletedSegment.location)
             }
             return
         }

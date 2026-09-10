@@ -827,10 +827,10 @@ final class WorkspaceModeUITests: XCTestCase {
         try runGitForUITest(["config", "user.name", "DiffEdit Tests"], in: directory)
         try runGitForUITest(["config", "user.email", "diffedit-tests@example.invalid"], in: directory)
         let file = directory.appendingPathComponent("replacement.txt")
-        try "alpha old omega\n".write(to: file, atomically: true, encoding: .utf8)
+        try "alpha old tired words omega\n".write(to: file, atomically: true, encoding: .utf8)
         try runGitForUITest(["add", "."], in: directory)
         try runGitForUITest(["commit", "-qm", "initial"], in: directory)
-        try "alpha extraordinary omega\n".write(to: file, atomically: true, encoding: .utf8)
+        try "alpha extraordinary fresh phrase omega\n".write(to: file, atomically: true, encoding: .utf8)
         let editor = EditorViewController()
         let window = NSWindow(contentViewController: editor)
         defer { window.orderOut(nil) }
@@ -841,8 +841,8 @@ final class WorkspaceModeUITests: XCTestCase {
         let past = try XCTUnwrap(texts.first(where: { !$0.isEditable }))
         let layout = try XCTUnwrap(past.layoutManager)
         XCTAssertFalse(past.showsCaretMarker)
-        let oldRange = (past.string as NSString).range(of: "old")
-        for offset in 6..<19 {
+        let oldRange = (past.string as NSString).range(of: "old tired words")
+        for offset in 6..<32 {
             current.setSelectedRange(NSRange(location: offset, length: 0))
             editor.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: current))
             var effective = NSRange()
