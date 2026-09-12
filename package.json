@@ -1,0 +1,34 @@
+{
+  "name": "diffedit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "tauri": "TAURI_APP_PATH=backend TAURI_FRONTEND_PATH=. tauri",
+    "test": "node --import tsx --test frontend/*.test.ts",
+    "test:editor": "node scripts/editor-smoke.mjs",
+    "format": "prettier --write frontend scripts *.json *.mjs && cargo fmt --manifest-path backend/Cargo.toml",
+    "build:app": "npm run tauri -- build",
+    "test:native": "cargo test --manifest-path backend/Cargo.toml",
+    "test:layout": "node scripts/webkit-layout.mjs"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6",
+    "@codemirror/search": "^6",
+    "@codemirror/state": "^6",
+    "@codemirror/view": "^6",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/node": "^22",
+    "happy-dom": "^20.14.3",
+    "prettier": "^3.9.6",
+    "tsx": "^4",
+    "typescript": "^5",
+    "vite": "^6"
+  }
+}

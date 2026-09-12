@@ -1,0 +1,1 @@
+{"identifier":"default","windows":["*"],"permissions":["core:default","core:window:allow-set-title","core:window:allow-destroy","core:webview:allow-create-webview-window","core:menu:default","dialog:allow-open","dialog:allow-message","dialog:allow-ask","dialog:allow-confirm"]}

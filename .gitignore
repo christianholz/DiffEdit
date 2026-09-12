@@ -1,33 +1,5 @@
 .DS_Store
-
-# Xcode
-xcuserdata/
-DerivedData/
-.xcode-derived/
-*.hmap
-*.ipa
-*.dSYM
-*.dSYM.zip
-timeline.xctimeline
-playground.xcworkspace
-
-# Swift Package Manager and local compiler caches
-.build/
-.build-xcode-toolchain/
-.swiftpm/
-.cache/
-
-# App packaging
-build/
-
-# Carthage
-Carthage/Build/
-
-# fastlane
-fastlane/report.xml
-fastlane/Preview.html
-fastlane/screenshots/**/*.png
-fastlane/test_output
-
-# Local GitHub Desktop reference checkout
-GitHub-Desktop/
+node_modules/
+dist/
+backend/target/
+backend/gen/

@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>DiffEdit</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #242428;
+        color: #d5d5d8;
+        color-scheme: dark;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="workspace">
+        <aside class="sidebar">
+          <span class="root">FOLDERS</span>
+          <div class="tree"></div>
+          <span id="branch" hidden></span>
+          <div class="commit-box" hidden>
+            <input id="summary" placeholder="Commit summary" /><textarea
+              id="body"
+              placeholder="Description (optional)"
+            ></textarea
+            ><button id="stage-selected">Stage selected lines</button
+            ><button id="commit">Commit staged changes</button>
+          </div>
+          <div class="mode-switch" role="group" aria-label="Workspace mode">
+            <button id="edit-mode" disabled aria-pressed="true">Editing</button
+            ><button id="commit-mode" disabled aria-pressed="false">
+              Committing
+            </button>
+          </div>
+        </aside>
+        <div class="sidebar-divider"></div>
+        <main class="main">
+          <div class="placeholder">
+            <span>Select a file to compare with HEAD.</span>
+          </div>
+          <div class="editor-stack" hidden>
+            <div class="past"></div>
+            <div class="divider"></div>
+            <div class="now-row">
+              <div class="now"></div>
+              <div class="overview"></div>
+            </div>
+          </div>
+          <div class="stage" hidden></div>
+          <div class="search" hidden>
+            <div class="search-row">
+              <input id="query" placeholder="Find" /><span id="matches"></span
+              ><button id="find-prev">↑</button><button id="find-next">↓</button
+              ><button id="close-search">✕</button>
+            </div>
+            <div class="search-row" id="replace-row" hidden>
+              <input id="replacement" placeholder="Replace with" /><button
+                id="replace-one"
+              >
+                Replace</button
+              ><button id="replace-all">Replace All</button>
+            </div>
+          </div>
+          <div class="overlay" hidden>
+            <span class="spinner"></span><span id="busy-message"></span>
+          </div>
+        </main>
+      </div>
+      <footer class="status">
+        <span class="message">Open a folder to begin.</span
+        ><span class="timing"></span>
+      </footer>
+      <dialog class="quick">
+        <input id="quick-query" placeholder="Find a file…" />
+        <div class="quick-list"></div>
+      </dialog>
+      <dialog class="modal">
+        <div class="modal-message"></div>
+        <div class="modal-actions"></div>
+      </dialog>
+    </div>
+    <script type="module" src="/bootstrap.ts"></script>
+  </body>
+</html>
