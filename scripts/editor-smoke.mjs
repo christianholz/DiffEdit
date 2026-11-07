@@ -22,6 +22,7 @@ for (const name of [
   "DOMRect",
   "Range",
   "KeyboardEvent",
+  "Event",
 ])
   Object.defineProperty(globalThis, name, {
     value: name === "window" ? dom : dom[name],
@@ -36,6 +37,8 @@ document.body.innerHTML = (await readFile("frontend/index.html", "utf8"))
 let commitCalls = 0,
   commitSelection;
 let holdCommit;
+let inspectionGate = null;
+let stageRowCount = 2;
 let text = "Original paragraph.\nSecond line.\n",
   base = text,
   version = 0,
@@ -51,6 +54,8 @@ const switchDocuments = {
     text: longText,
     disk: longText,
     version: 0,
+    head: "h",
+    baseExists: true,
   },
   "short.tex": {
     path: "short.tex",
@@ -58,21 +63,34 @@ const switchDocuments = {
     text: "New.\n",
     disk: "New.\n",
     version: 0,
+    head: "h",
+    baseExists: true,
   },
 };
 function diff() {
+  let left = 0,
+    right = 0;
+  while (left < base.length && left < text.length && base[left] === text[left])
+    left++;
+  while (
+    right < base.length - left &&
+    right < text.length - left &&
+    base[base.length - 1 - right] === text[text.length - 1 - right]
+  )
+    right++;
   return {
     version,
+    head: "h",
     diff: {
       changes:
         text === base
           ? []
           : [
               {
-                a: base.length,
-                aEnd: base.length,
-                b: base.length,
-                bEnd: text.length,
+                a: left,
+                aEnd: base.length - right,
+                b: left,
+                bEnd: text.length - right,
               },
             ],
       micros: 100,
@@ -92,14 +110,45 @@ mockIPC(
     if (cmd.startsWith("plugin:")) return null;
     if (cmd === "commit_changes") {
       commitCalls++;
-      commitSelection = args.selection;
+      commitSelection = args.selections;
       await new Promise((resolve) => {
         holdCommit = resolve;
       });
       return "Committed";
     }
-    if (cmd === "inspect_document")
-      return { path: "fixture.tex", text, base, disk, version };
+    if (cmd === "inspect_document") {
+      const snapshot = {
+        base,
+        disk,
+        version,
+        head: "h",
+        baseExists: true,
+        diff: diff().diff,
+      };
+      const gate = inspectionGate;
+      inspectionGate = null;
+      if (gate) await gate;
+      return snapshot;
+    }
+    if (cmd === "resolve_document") {
+      assert.equal(args.version, version);
+      if (args.reload) {
+        text = disk ?? "";
+        version++;
+      }
+      return {
+        document: {
+          path: args.path,
+          text,
+          base,
+          disk,
+          version,
+          head: "h",
+          baseExists: true,
+        },
+        diff: diff().diff,
+      };
+    }
     if (cmd === "route_folder") return args.root;
     if (cmd === "quick_matches")
       return Array.from({ length: 300 }, (_, i) => `file-${i}.tex`);
@@ -111,7 +160,9 @@ mockIPC(
         branch: "main",
         files: ["fixture.tex", "unchanged.txt"],
         changed: ["fixture.tex"],
-        staged: [],
+        staged: ["fixture.tex"],
+        head: "h",
+        index: "index",
       };
     if (switchDocuments[args.path]) {
       const doc = switchDocuments[args.path];
@@ -123,6 +174,8 @@ mockIPC(
             : 0;
         return {
           version: 0,
+          head: "h",
+          baseExists: true,
           diff: {
             micros: 1,
             changes: [
@@ -138,7 +191,15 @@ mockIPC(
       }
     }
     if (cmd === "open_document")
-      return { path: "fixture.tex", text, base, disk, version };
+      return {
+        path: "fixture.tex",
+        text,
+        base,
+        disk,
+        version,
+        head: "h",
+        baseExists: true,
+      };
     if (cmd === "document_diff") return diff();
     if (cmd === "edit_document") {
       assert.equal(args.version, version + 1);
@@ -149,15 +210,55 @@ mockIPC(
     }
     if (cmd === "save_document") {
       disk = text;
-      return { path: "fixture.tex", text, base, disk, version };
+      return {
+        path: "fixture.tex",
+        text,
+        base,
+        disk,
+        version,
+        head: "h",
+        baseExists: true,
+      };
     }
-    if (cmd === "menu_state" || cmd === "remember_folder") return null;
+    if (
+      cmd === "frontend_ready" ||
+      cmd === "menu_state" ||
+      cmd === "remember_folder"
+    )
+      return null;
     if (cmd === "document_path" || cmd === "resize_grid") return null;
     if (cmd === "stage_rows")
-      return [
-        { id: "first", kind: "insert", oldLine: null, newLine: 3, text: "wo" },
-        { id: "second", kind: "insert", oldLine: null, newLine: 4, text: "rd" },
-      ];
+      return {
+        version,
+        head: "h",
+        index: "index",
+        selected: ["first", "second"],
+        rows:
+          stageRowCount > 2
+            ? Array.from({ length: stageRowCount }, (_, i) => ({
+                id: `line:${i}`,
+                kind: "insert",
+                oldLine: null,
+                newLine: i + 1,
+                text: "line\n",
+              }))
+            : [
+                {
+                  id: "first",
+                  kind: "insert",
+                  oldLine: null,
+                  newLine: 3,
+                  text: "wo",
+                },
+                {
+                  id: "second",
+                  kind: "insert",
+                  oldLine: null,
+                  newLine: 4,
+                  text: "rd",
+                },
+              ],
+      };
     throw Error("Unmocked command " + cmd);
   },
   { shouldMockEvents: true },
@@ -167,7 +268,7 @@ const source =
     'import "./style.css";',
     "",
   ) +
-  "\nexport {editor,past,activate,openFolder,action,flush,buffers,save,selectedChanges,restoreChanges,mappedSelection,renderStage,commit,busy,decorations,filterQuick,quickMatches,menuAvailability};";
+  "\nexport {active,foreground,resolve,closeWindow,editor,past,activate,openFolder,action,flush,buffers,save,selectedChanges,restoreChanges,mappedSelection,renderStage,commit,busy,decorations,filterQuick,quickMatches,menuAvailability};";
 await mkdir("node_modules/.cache", { recursive: true });
 const built = await build({
   stdin: {
@@ -345,6 +446,7 @@ try {
   await app.action("replace");
   assert.equal(document.querySelector("#replace-row").hidden, false);
   await app.flush(app.buffers.get("fixture.tex"));
+  document.querySelector("#summary").value = "Selected changes";
   const committing = app.commit();
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.ok(Object.values(app.menuAvailability()).every((v) => !v));
@@ -353,7 +455,10 @@ try {
   assert.equal(app.editor.state.doc.toString(), before);
   await app.commit();
   assert.equal(commitCalls, 1);
-  assert.deepEqual(commitSelection.selected, ["second"]);
+  assert.deepEqual(
+    commitSelection.find((s) => s.path === "fixture.tex").selected,
+    ["second"],
+  );
   holdCommit();
   await committing;
   assert.equal(document.querySelector(".sidebar").inert, false);
@@ -385,6 +490,64 @@ try {
     app.editor.state.doc.lineAt(app.editor.state.selection.main.head).number,
     3,
   );
+  stageRowCount = 10000;
+  document.querySelector("#commit-mode").click();
+  await app.renderStage();
+  assert.ok(
+    document.querySelectorAll(".stage-row").length < 100,
+    "large stage view is virtualized",
+  );
+  const stageView = document.querySelector(".stage");
+  stageView.scrollTop = 9000 * 26.15;
+  stageView.dispatchEvent(new Event("scroll"));
+  assert.ok(
+    stageView.textContent.includes("9001"),
+    "scrolling renders distant rows",
+  );
+  stageRowCount = 2;
+  document.querySelector("#edit-mode").click();
+  // Inspecting external state must not discard typing or install stale ranges.
+  await app.save();
+  let releaseInspection;
+  inspectionGate = new Promise((resolve) => (releaseInspection = resolve));
+  const inspecting = app.foreground();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  app.editor.dispatch({
+    changes: { from: app.editor.state.doc.length, insert: "!" },
+  });
+  await app.flush(app.active);
+  releaseInspection();
+  await inspecting;
+  assert.ok(app.editor.state.doc.toString().endsWith("!"));
+  await app.save();
+  disk = "External replacement.\n";
+  await app.foreground();
+  assert.equal(app.editor.state.doc.toString(), disk);
+  const rangesAfterReload = app.editor.state.field(app.decorations).iter();
+  while (rangesAfterReload.value) {
+    assert.ok(rangesAfterReload.to <= app.editor.state.doc.length);
+    rangesAfterReload.next();
+  }
+  // Closing establishes a stable snapshot while still allowing modal keyboard input.
+  app.editor.dispatch({ changes: { from: 0, insert: "unsaved " } });
+  await app.flush(app.active);
+  const closingWindow = app.closeWindow();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const stable = app.editor.state.doc.toString();
+  app.editor.dispatch({ changes: { from: 0, insert: "blocked" } });
+  assert.equal(app.editor.state.doc.toString(), stable);
+  const modalKey = new KeyboardEvent("keydown", {
+    key: "Tab",
+    bubbles: true,
+    cancelable: true,
+  });
+  document.querySelector(".modal").dispatchEvent(modalKey);
+  assert.equal(modalKey.defaultPrevented, false);
+  [...document.querySelectorAll(".modal-actions button")]
+    .find((b) => b.textContent === "Cancel")
+    .click();
+  await closingWindow;
+  assert.equal(document.querySelector(".sidebar").inert, false);
   // Repeated sidebar clicks must not reinstall the current editor state.
   const originalSetState = app.editor.setState;
   let stateResets = 0;

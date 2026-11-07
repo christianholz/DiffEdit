@@ -37,7 +37,14 @@ fn hunks(
 fn offsets(tokens: &[&str]) -> Vec<usize> {
     let mut v = vec![0];
     for t in tokens {
-        v.push(v.last().unwrap() + t.encode_utf16().count());
+        v.push(
+            v.last().unwrap()
+                + if t.is_ascii() {
+                    t.len()
+                } else {
+                    t.encode_utf16().count()
+                },
+        );
     }
     v
 }
@@ -86,57 +93,90 @@ fn closely_related(a: &str, b: &str) -> bool {
     shared >= 3 && shared * 3 >= x.len().max(y.len()) * 2
 }
 fn group_phrases(changes: Vec<Change>, a: &str, b: &str) -> Vec<Change> {
-    fn offsets(s: &str) -> Vec<usize> {
-        let mut result = Vec::with_capacity(s.len() + 1);
-        for (byte, ch) in s.char_indices() {
-            for _ in 0..ch.len_utf16() {
-                result.push(byte);
-            }
-        }
-        result.push(s.len());
-        result
+    if changes.is_empty() {
+        return changes;
     }
-    let ax = offsets(a);
-    let bx = offsets(b);
-    let mut grouped: Vec<Change> = Vec::new();
+    // Store offsets only at change boundaries, rather than one usize per
+    // UTF-16 unit of both documents. A sparse edit now uses sparse memory.
+    fn positions(s: &str, mut wanted: Vec<usize>) -> Vec<(usize, usize)> {
+        wanted.sort_unstable();
+        wanted.dedup();
+        if s.is_ascii() {
+            return wanted.into_iter().map(|p| (p, p)).collect();
+        }
+        let mut found = Vec::with_capacity(wanted.len());
+        let mut units = 0;
+        let mut at = wanted.into_iter().peekable();
+        for (byte, ch) in s.char_indices().chain(std::iter::once((s.len(), '\0'))) {
+            if at.peek() == Some(&units) {
+                found.push((units, byte));
+                at.next();
+            }
+            if at.peek().is_none() {
+                break;
+            }
+            units += ch.len_utf16();
+        }
+        found
+    }
+    let ax = positions(a, changes.iter().flat_map(|c| [c.a, c.a_end]).collect());
+    let bx = positions(b, changes.iter().flat_map(|c| [c.b, c.b_end]).collect());
+    let byte = |v: &Vec<(usize, usize)>, p| v[v.binary_search_by_key(&p, |(u, _)| *u).unwrap()].1;
+    let mut grouped: Vec<(Change, usize, usize, usize, usize, bool)> = Vec::new();
     for c in changes {
-        if let Some(last) = grouped.last_mut() {
-            let ag = &a[ax[last.a_end]..ax[c.a]];
-            let bg = &b[bx[last.b_end]..bx[c.b]];
-            // Horizontal separators inside a consecutive rewrite belong to its group.
-            // Keep punctuation, actual equal words and paragraph boundaries as anchors.
-            let multiline = a[ax[last.a]..ax[c.a_end]].contains('\n')
-                || b[bx[last.b]..bx[c.b_end]].contains('\n');
-            if ag == bg && !multiline && ag.chars().all(|c| c == ' ' || c == '\t') {
+        let (aa, ae, bb, be) = (
+            byte(&ax, c.a),
+            byte(&ax, c.a_end),
+            byte(&bx, c.b),
+            byte(&bx, c.b_end),
+        );
+        let multiline = a[aa..ae].contains('\n') || b[bb..be].contains('\n');
+        if let Some((last, _, lae, _, lbe, last_multiline)) = grouped.last_mut() {
+            let ag = &a[*lae..aa];
+            let bg = &b[*lbe..bb];
+            if !*last_multiline
+                && !multiline
+                && ag == bg
+                && ag.chars().all(|c| c == ' ' || c == '\t')
+            {
                 last.a_end = c.a_end;
                 last.b_end = c.b_end;
+                *lae = ae;
+                *lbe = be;
                 continue;
             }
         }
-        grouped.push(c);
+        grouped.push((c, aa, ae, bb, be, multiline));
     }
-    for c in &mut grouped {
-        while c.a < c.a_end && c.b < c.b_end {
-            let x = a[ax[c.a]..].chars().next().unwrap();
-            let y = b[bx[c.b]..].chars().next().unwrap();
+    let mut result = Vec::with_capacity(grouped.len());
+    for (mut c, mut aa, mut ae, mut bb, mut be, _) in grouped {
+        while aa < ae && bb < be {
+            let x = a[aa..ae].chars().next().unwrap();
+            let y = b[bb..be].chars().next().unwrap();
             if x != y || !x.is_whitespace() {
                 break;
             }
+            aa += x.len_utf8();
+            bb += y.len_utf8();
             c.a += x.len_utf16();
             c.b += y.len_utf16();
         }
-        while c.a < c.a_end && c.b < c.b_end {
-            let x = a[..ax[c.a_end]].chars().next_back().unwrap();
-            let y = b[..bx[c.b_end]].chars().next_back().unwrap();
+        while aa < ae && bb < be {
+            let x = a[aa..ae].chars().next_back().unwrap();
+            let y = b[bb..be].chars().next_back().unwrap();
             if x != y || !x.is_whitespace() {
                 break;
             }
+            ae -= x.len_utf8();
+            be -= y.len_utf8();
             c.a_end -= x.len_utf16();
             c.b_end -= y.len_utf16();
         }
+        if c.a < c.a_end || c.b < c.b_end {
+            result.push(c);
+        }
     }
-    grouped.retain(|c| c.a < c.a_end || c.b < c.b_end);
-    grouped
+    result
 }
 fn refine(a: &str, b: &str, ao: usize, bo: usize, out: &mut Vec<Change>, depth: u8) {
     let at: Vec<&str> = if depth == 0 {
@@ -151,7 +191,27 @@ fn refine(a: &str, b: &str, ao: usize, bo: usize, out: &mut Vec<Change>, depth: 
     };
     let ap = offsets(&at);
     let bp = offsets(&bt);
-    for (ar, br) in hunks(&at, &bt, Algorithm::Myers) {
+    let prefix = at.iter().zip(&bt).take_while(|(a, b)| a == b).count();
+    let suffix = at[prefix..]
+        .iter()
+        .rev()
+        .zip(bt[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let ae = at.len() - suffix;
+    let be = bt.len() - suffix;
+    if (ae - prefix).saturating_mul(be - prefix) > 4_000_000 {
+        out.push(Change {
+            a: ao + ap[prefix],
+            a_end: ao + ap[ae],
+            b: bo + bp[prefix],
+            b_end: bo + bp[be],
+        });
+        return;
+    }
+    for (ar, br) in hunks(&at[prefix..ae], &bt[prefix..be], Algorithm::Myers) {
+        let ar = ar.start + prefix..ar.end + prefix;
+        let br = br.start + prefix..br.end + prefix;
         if depth == 0
             && !ar.is_empty()
             && !br.is_empty()
@@ -259,6 +319,12 @@ fn refine_lines(a: &str, b: &str, ao: usize, bo: usize, out: &mut Vec<Change>) {
 }
 pub fn compute(a: &str, b: &str) -> DiffResult {
     let start = std::time::Instant::now();
+    if a == b {
+        return DiffResult {
+            changes: Vec::new(),
+            micros: start.elapsed().as_micros(),
+        };
+    }
     let at: Vec<&str> = a.split_inclusive('\n').collect();
     let bt: Vec<&str> = b.split_inclusive('\n').collect();
     let ap = offsets(&at);
@@ -290,6 +356,7 @@ pub fn compute(a: &str, b: &str) -> DiffResult {
         micros: start.elapsed().as_micros(),
     }
 }
+#[cfg(test)]
 pub fn byte_at(s: &str, p: usize) -> Result<usize, String> {
     let mut n = 0;
     for (i, c) in s.char_indices() {
@@ -316,6 +383,12 @@ pub struct StageRow {
     pub old_line: Option<usize>,
     pub new_line: Option<usize>,
 }
+fn row_id(kind: char, index: usize, text: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hash);
+    format!("{kind}:{index}:{:x}", hash.finish())
+}
 pub fn stage_rows(a: &str, b: &str) -> Vec<StageRow> {
     let at: Vec<&str> = a.split_inclusive('\n').collect();
     let bt: Vec<&str> = b.split_inclusive('\n').collect();
@@ -336,7 +409,7 @@ pub fn stage_rows(a: &str, b: &str) -> Vec<StageRow> {
         }
         for i in ar.clone() {
             rows.push(StageRow {
-                id: Some(format!("d:{i}:{}", at[i])),
+                id: Some(row_id('d', i, at[i])),
                 kind: "delete".into(),
                 text: at[i].into(),
                 old_line: Some(i + 1),
@@ -345,7 +418,7 @@ pub fn stage_rows(a: &str, b: &str) -> Vec<StageRow> {
         }
         for i in br.clone() {
             rows.push(StageRow {
-                id: Some(format!("i:{i}:{}", bt[i])),
+                id: Some(row_id('i', i, bt[i])),
                 kind: "insert".into(),
                 text: bt[i].into(),
                 old_line: None,
@@ -524,4 +597,54 @@ pub fn benchmark(paths: &[String]) -> Result<(), String> {
         times[28] as f64 / 1000.
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    fn aligned(a: &str, b: &str) {
+        let d = compute(a, b);
+        let (mut x, mut y) = (0, 0);
+        let mut rebuilt = String::new();
+        for c in d.changes {
+            let (aa, ae, bb, be) = (
+                byte_at(a, c.a).unwrap(),
+                byte_at(a, c.a_end).unwrap(),
+                byte_at(b, c.b).unwrap(),
+                byte_at(b, c.b_end).unwrap(),
+            );
+            assert!(aa >= x && bb >= y && ae >= aa && be >= bb);
+            assert_eq!(&a[x..aa], &b[y..bb]);
+            rebuilt.push_str(&a[x..aa]);
+            rebuilt.push_str(&b[bb..be]);
+            x = ae;
+            y = be;
+        }
+        assert_eq!(&a[x..], &b[y..]);
+        rebuilt.push_str(&a[x..]);
+        assert_eq!(rebuilt, b);
+    }
+    #[test]
+    fn unicode_random_edits_and_bounded_large_rewrites_preserve_alignment() {
+        let mut seed = 7u32;
+        let mut rand = |n: usize| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed as usize % n
+        };
+        let alphabet = ["a", "word", " ", "\n", "🦀", "é", "𐐀", ".", "\t"];
+        for _ in 0..1000 {
+            let a = (0..rand(80))
+                .map(|_| alphabet[rand(alphabet.len())])
+                .collect::<String>();
+            let mut chars: Vec<_> = a.chars().collect();
+            let from = rand(chars.len() + 1);
+            let to = from + rand(chars.len() - from + 1);
+            chars.splice(from..to, alphabet[rand(alphabet.len())].chars());
+            let b = chars.into_iter().collect::<String>();
+            aligned(&a, &b);
+        }
+        let a = (0..3000).map(|i| format!("before{i} ")).collect::<String>();
+        let b = (0..3000).map(|i| format!("after{i} ")).collect::<String>();
+        aligned(&a, &b);
+    }
 }

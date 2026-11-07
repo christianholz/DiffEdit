@@ -1,4 +1,4 @@
-import { EditorView, ViewPlugin } from "@codemirror/view";
+import { EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 
 function capacity(view: EditorView) {
   const parent = view.dom.parentElement!;
@@ -34,8 +34,16 @@ export const pastViewport = [
         view.scrollDOM.addEventListener("scroll", this.onScroll);
         this.measure();
       }
-      onScroll = () => snap(this.view, this.view.scrollDOM.scrollTop);
-      update() {
+      scrollTimer: ReturnType<typeof setTimeout> | undefined;
+      onScroll = () => {
+        clearTimeout(this.scrollTimer);
+        this.scrollTimer = setTimeout(
+          () => snap(this.view, this.view.scrollDOM.scrollTop),
+          60,
+        );
+      };
+      update(update: ViewUpdate) {
+        if (!update.docChanged && !update.geometryChanged) return;
         this.measure();
       }
       measure() {
@@ -65,6 +73,7 @@ export const pastViewport = [
         });
       }
       destroy() {
+        clearTimeout(this.scrollTimer);
         this.observer.disconnect();
         this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
       }
@@ -125,8 +134,16 @@ export const wholeRowScroll = ViewPlugin.fromClass(
     constructor(readonly view: EditorView) {
       view.scrollDOM.addEventListener("scroll", this.onScroll);
     }
-    onScroll = () => snap(this.view, this.view.scrollDOM.scrollTop);
-    update() {
+    scrollTimer: ReturnType<typeof setTimeout> | undefined;
+    onScroll = () => {
+      clearTimeout(this.scrollTimer);
+      this.scrollTimer = setTimeout(
+        () => snap(this.view, this.view.scrollDOM.scrollTop),
+        60,
+      );
+    };
+    update(update: ViewUpdate) {
+      if (!update.docChanged && !update.geometryChanged) return;
       this.view.requestMeasure({
         key: this,
         read: (view) => view.scrollDOM.clientHeight % view.defaultLineHeight,
@@ -145,6 +162,7 @@ export const wholeRowScroll = ViewPlugin.fromClass(
       });
     }
     destroy() {
+      clearTimeout(this.scrollTimer);
       this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
     }
   },

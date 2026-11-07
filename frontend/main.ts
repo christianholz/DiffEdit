@@ -1,3 +1,7 @@
+import { virtualRows, clearVirtualRows } from "./virtual-rows";
+import { DialogQueue } from "./dialogs";
+import { BufferStore, DocumentSync } from "./synchronization";
+import { readPreferences } from "./preferences";
 import { pastViewport, wholeRowScroll } from "./past-viewport";
 import { editorStyleNonce } from "./editor-style";
 import { previewChanges } from "./preview";
@@ -8,7 +12,6 @@ import {
   StateField,
   Compartment,
   Transaction,
-  ChangeSet,
   Text,
 } from "@codemirror/state";
 import {
@@ -49,7 +52,8 @@ import { Menu, MenuItem } from "@tauri-apps/api/menu";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Change,
-  Diff,
+  DiffUpdate,
+  StageSnapshot,
   Repo,
   Document,
   StageRow,
@@ -66,9 +70,9 @@ let repo: Repo | null = null,
   active: BufferState | null = null,
   refreshing = false,
   closing = false;
-const buffers = new Map<string, BufferState>(),
+const buffers = new BufferStore<BufferState>(),
   expanded = new Set<string>();
-const prefs = JSON.parse(localStorage.getItem("preferences") || "{}");
+const prefs = readPreferences(localStorage);
 let wrap: boolean = prefs.wrap ?? true,
   whitespace: boolean = prefs.whitespace ?? false,
   font: number = prefs.font ?? 13;
@@ -76,15 +80,16 @@ let pastHeight: number = Math.max(45, prefs.pastHeight ?? 5 * font * 1.55 + 16);
 let quickPaths: string[] = [],
   quickIndex = 0,
   opening = 0;
-interface BufferState extends Document {
+interface BufferState extends Omit<Document, "text"> {
   state: EditorState;
   changes: Change[];
-  pending: ChangeSet | null;
-  flight: Promise<void> | null;
-  error: string | null;
+  sync: DocumentSync;
+  index: string;
+  locked: boolean;
   scroll: number;
   selection: Set<string> | null;
   rows: StageRow[];
+  rowIds: string[];
   micros: number;
   revision: number;
   diskDoc: Text;
@@ -178,13 +183,16 @@ class Marker extends WidgetType {
 }
 let splitUndo = false,
   lastInputClass = "";
-let quitPending = false;
+let quitPending: number | null = null;
 let operationBusy = false;
 const editor = new EditorView({
   parent: $(".now"),
   state: makeState(""),
   dispatchTransactions: (trs) => {
-    if ((quitPending || operationBusy) && trs.some((tr) => tr.docChanged))
+    if (
+      (quitPending || operationBusy || active?.locked) &&
+      trs.some((tr) => tr.docChanged)
+    )
       return;
     const b = active;
     editor.update(trs);
@@ -192,16 +200,15 @@ const editor = new EditorView({
     for (const tr of trs) {
       if (tr.docChanged) {
         b.revision++;
-        b.pending = b.pending ? b.pending.compose(tr.changes) : tr.changes;
         b.changes = previewChanges(b.changes, b.base, tr);
         b.state = editor.state;
-        b.text = "";
-        void pump(b);
+        b.sync.enqueue(tr.changes);
         updateTitle();
         updateFileIndicator(b);
       } else if (tr.selection) splitUndo = true;
     }
     if (trs.some((tr) => tr.docChanged)) {
+      scheduleOverview();
       editor.update([
         editor.state.update({
           effects: setDecorations.of(
@@ -355,7 +362,11 @@ function busy(s: string | null) {
   $("#busy-message").textContent = s || "";
   scheduleMenuState();
 }
-function choose(message: string, choices: string[]): Promise<string> {
+const dialogs = new DialogQueue(presentDialog);
+function choose(message: string, choices: string[]) {
+  return dialogs.choose(message, choices);
+}
+function presentDialog(message: string, choices: string[]): Promise<string> {
   return new Promise((resolve) => {
     const d = $<HTMLDialogElement>(".modal");
     $(".modal-message").textContent = message;
@@ -412,10 +423,9 @@ function updateStatus() {
     `Ln ${l.number}, Col ${p - l.from + 1}  ·  ${active.changes.length} changes${dirty(active) ? "  ·  Unsaved" : ""}`,
   );
 }
+const fileElements = new Map<string, HTMLElement>();
 function updateFileIndicator(b: BufferState) {
-  const el = Array.from(
-    document.querySelectorAll<HTMLElement>("[data-path]"),
-  ).find((el) => el.dataset.path === b.path);
+  const el = fileElements.get(b.path);
   if (el) {
     const dot = el.querySelector(".dirty");
     if (dot) dot.textContent = dirty(b) ? "●" : "";
@@ -427,34 +437,39 @@ async function pickFolder() {
 }
 async function openFolder(root: string, routed = false) {
   if (operationBusy) return;
-  if (!routed) {
-    const selected = await invoke<string | null>("route_folder", {
-      root,
-      reuse: !repo,
-    });
-    if (selected === null) return;
-    root = selected;
-    if (repo?.root === root) return;
-  }
-  if (buffers.size && !(await canClose())) return;
   busy("Opening folder…");
   try {
+    if (!routed) {
+      const selected = await invoke<string | null>("route_folder", {
+        root,
+        reuse: !repo,
+      });
+      if (selected === null || repo?.root === selected) return;
+      root = selected;
+    }
+    if (refreshFlight) await refreshFlight;
+    if (buffers.size && !(await canClose())) return;
     for (const b of buffers.values()) await flush(b);
-    repo = await invoke<Repo>("open_folder", { root });
+    ++opening;
+    const opened = await invoke<Repo>("open_folder", { root });
     buffers.clear();
+    repo = opened;
     active = null;
+    currentMode = "edit";
+    $("#edit-mode").setAttribute("aria-pressed", "true");
+    $("#commit-mode").setAttribute("aria-pressed", "false");
+    $(".search").hidden = true;
+    $(".commit-box").hidden = true;
+    $("#branch").hidden = true;
     editor.setState(makeState(""));
     $(".editor-stack").hidden = true;
     $(".stage").hidden = true;
     $(".placeholder").hidden = false;
     $<HTMLButtonElement>("#edit-mode").disabled = false;
     $<HTMLButtonElement>("#commit-mode").disabled = !repo.gitRoot;
-
     $("#branch").textContent = `Branch: ${repo.branch}`;
     expanded.clear();
-    await invoke("remember_folder", {
-      root: repo.root,
-    }).catch(console.error);
+    await invoke("remember_folder", { root: repo.root }).catch(console.error);
     renderTree();
     status(`${repo.files.length} files · ${repo.changed.length} changed`);
     updateTitle();
@@ -484,8 +499,20 @@ function folderCaption(
     button.append(dot);
   }
 }
+let membershipRepo: Repo | null = null;
+let changedPaths = new Set<string>(),
+  stagedPaths = new Set<string>();
+function repoMembership() {
+  if (membershipRepo !== repo) {
+    membershipRepo = repo;
+    changedPaths = new Set(repo?.changed);
+    stagedPaths = new Set(repo?.staged);
+  }
+}
 function renderTree() {
+  repoMembership();
   const tree = $(".tree");
+  fileElements.clear();
   tree.replaceChildren();
   if (!repo) return;
   const root = document.createElement("button");
@@ -504,7 +531,7 @@ function renderTree() {
   if (!rootExpanded) return;
   const shownDirs = new Set<string>();
   const changed = (p: string) =>
-    repo!.changed.includes(p) || !!(buffers.has(p) && dirty(buffers.get(p)!));
+    changedPaths.has(p) || !!(buffers.has(p) && dirty(buffers.get(p)!));
   const files = mode() === "stage" ? repo.files.filter(changed) : repo.files;
   $(".root").textContent =
     mode() === "stage" ? `CHANGES (${files.length})` : "FOLDERS";
@@ -538,6 +565,7 @@ function renderTree() {
     if (hidden) continue;
     const el = document.createElement("button");
     el.dataset.path = path;
+    fileElements.set(path, el);
     el.classList.toggle("active", active?.path === path);
     el.style.paddingLeft = `${parts.length * 16 + 6}px`;
     const leading = document.createElement("span");
@@ -548,7 +576,7 @@ function renderTree() {
     name.textContent = parts.at(-1)!;
     const dot = document.createElement("span");
     dot.className = "dot";
-    dot.textContent = repo.changed.includes(path) ? "●" : "";
+    dot.textContent = changedPaths.has(path) ? "●" : "";
     const unsaved = document.createElement("span");
     unsaved.className = "dirty";
     unsaved.textContent =
@@ -557,11 +585,11 @@ function renderTree() {
       const check = document.createElement("input");
       check.type = "checkbox";
       const b = buffers.get(path);
-      const ids = b?.rows.flatMap((r) => (r.id ? [r.id] : [])) || [];
+      const ids = b?.rowIds || [];
       const count = ids.filter((id) => b?.selection?.has(id)).length;
       check.checked =
         b?.selection === null || !b
-          ? repo.changed.includes(path)
+          ? stagedPaths.has(path)
           : ids.length > 0 && count === ids.length;
       check.indeterminate = count > 0 && count < ids.length;
       check.onclick = (e) => {
@@ -571,9 +599,7 @@ function renderTree() {
           await activate(path);
           await renderStage();
           if (!active || active.path !== path) return;
-          active.selection = new Set(
-            all ? active.rows.flatMap((r) => (r.id ? [r.id] : [])) : [],
-          );
+          active.selection = new Set(all ? active.rowIds : []);
           await renderStage();
           renderTree();
         })().catch(fail);
@@ -599,38 +625,15 @@ async function activate(path: string) {
     active.state = editor.state;
     active.scroll = editor.scrollDOM.scrollTop;
   }
-  let b = buffers.get(path);
-  if (!b) {
-    status("Opening…");
-    const d = await invoke<Document>("open_document", { path });
-    b = {
-      ...d,
-      state: makeState(d.text),
-      changes: [],
-      pending: null,
-      flight: null,
-      error: null,
-      scroll: 0,
-      selection: null,
-      rows: [],
-      micros: 0,
-      revision: 0,
-      diskDoc: Text.of((d.disk ?? "").split("\n")),
-      diffEpoch: 0,
-    };
-    buffers.set(path, b);
-    const u = await invoke<{ version: number; diff: Diff }>("document_diff", {
-      path,
-    });
-    b.changes = u.diff.changes;
-    b.micros = u.diff.micros;
-  }
+  const b = await loadBuffer(path);
   if (id !== opening) return;
   past.contentDOM.blur();
+  if (active && active !== b) active.rows = [];
   active = b;
   splitUndo = true;
   lastInputClass = "";
   editor.setState(b.state);
+  if (!$(".search").hidden) updateQuery();
   editor.dispatch({
     effects: wrapConfig.reconfigure(wrap ? EditorView.lineWrapping : []),
   });
@@ -648,51 +651,52 @@ async function activate(path: string) {
   updateStatus();
   editor.focus();
 }
-async function pump(b: BufferState): Promise<void> {
-  if (b.flight) return b.flight;
-  if (!b.pending) return;
-  const changes = b.pending;
-  b.pending = null;
-  const edits: { from: number; to: number; insert: string }[] = [];
-  changes.iterChanges((from, to, _f, _t, text) =>
-    edits.push({ from, to, insert: text.toString() }),
-  );
-  const version = b.version + 1,
-    start = performance.now();
-  b.flight = (async () => {
-    try {
-      const result = await invoke<{ version: number; diff: Diff }>(
-        "edit_document",
-        { path: b.path, version, edits },
-      );
-      b.version = result.version;
-      b.error = null;
-      if (!b.pending) {
-        b.changes = result.diff.changes;
-        b.diffEpoch++;
-        b.micros = result.diff.micros;
-        if (active === b) {
-          applyDiff(b);
-          $(".timing").textContent =
-            `diff ${(b.micros / 1000).toFixed(1)} ms · round trip ${(performance.now() - start).toFixed(1)} ms`;
+async function loadBuffer(path: string): Promise<BufferState> {
+  return buffers.load(path, async () => {
+    const d = await invoke<Document>("open_document", { path });
+    const { text, ...snapshot } = d;
+    const b: BufferState = {
+      ...snapshot,
+      state: makeState(text),
+      changes: [],
+      scroll: 0,
+      selection: null,
+      rows: [],
+      rowIds: [],
+      micros: 0,
+      revision: 0,
+      diffEpoch: 0,
+      index: "",
+      locked: false,
+      diskDoc: Text.of((d.disk ?? "").split("\n")),
+      sync: null!,
+    };
+    b.sync = new DocumentSync({
+      path,
+      version: () => b.version,
+      text: () => b.state.doc.toString(),
+      invoke,
+      receive: (result, current) => {
+        b.version = result.version;
+        if (current && result.head === b.head) {
+          b.changes = result.diff.changes;
+          b.diffEpoch++;
+          b.micros = result.diff.micros;
+          if (active === b) applyDiff(b);
         }
-      }
-    } catch (e) {
-      b.error = String(e);
-      fail(e);
-    } finally {
-      b.flight = null;
+      },
+      fail,
+    });
+    const u = await invoke<DiffUpdate>("document_diff", { path });
+    if (u.head === b.head) {
+      b.changes = u.diff.changes;
+      b.micros = u.diff.micros;
     }
-  })();
-  await b.flight;
-  if (b.pending && !b.error) await pump(b);
+    return b;
+  });
 }
-async function flush(b: BufferState) {
-  while (b.flight || b.pending) {
-    await pump(b);
-    if (b.error) throw Error(b.error);
-  }
-  if (b.error) throw Error(b.error);
+function flush(b: BufferState) {
+  return b.sync.flush();
 }
 function marks(
   changes: Change[],
@@ -702,11 +706,7 @@ function marks(
 ): DecorationSet {
   const list = [];
   for (const c of changes) {
-    if (
-      !whitespace &&
-      !/\S/u.test(base.slice(c.a, c.aEnd) + current.sliceString(c.b, c.bEnd))
-    )
-      continue;
+    if (!visible(c, base, current, whitespace)) continue;
     const from = pastSide ? c.a : c.b,
       to = pastSide ? c.aEnd : c.bEnd;
     if (to > from)
@@ -737,29 +737,31 @@ function applyDiff(b: BufferState) {
   });
   b.state = editor.state;
   updatePast();
-  updateOverview();
+  scheduleOverview();
   updateStatus();
   void updateRestoreEnabled();
 }
+let pastMarks: {
+  buffer: BufferState;
+  revision: number;
+  epoch: number;
+  whitespace: boolean;
+  marks: DecorationSet;
+} | null = null;
 let lastPastKey = "";
 let pastScrollFocus = "";
 let lastPastBase = "";
 function updatePast() {
   const b = active;
-  if (!b || past.hasFocus) return;
+  if (!b || (past.hasFocus && lastPastBase === b.base)) return;
+  if (past.hasFocus) past.contentDOM.blur();
   const pos = editor.state.selection.main.head,
     c = changeAt(b.changes, pos);
   let target = basePosition(b.changes, pos),
     focus: [number, number] = wordRange(b.base, target),
     deleted = false,
     green = false;
-  if (
-    c &&
-    (whitespace ||
-      /\S/u.test(
-        b.base.slice(c.a, c.aEnd) + editor.state.sliceDoc(c.b, c.bEnd),
-      ))
-  ) {
+  if (c && visible(c, b.base, editor.state.doc, whitespace)) {
     if (c.aEnd > c.a) {
       focus = [c.a, c.aEnd];
       deleted = true;
@@ -775,6 +777,7 @@ function updatePast() {
   const movePast = scrollFocus !== pastScrollFocus || b.base !== lastPastBase;
   const key = JSON.stringify([
     b.path,
+    b.head,
     b.diffEpoch,
     b.revision,
     focus,
@@ -783,9 +786,24 @@ function updatePast() {
     editor.state.selection.toJSON(),
   ]);
   if (key === lastPastKey) return;
-  const baseChanged = past.state.doc.toString() !== b.base;
+  const baseChanged = lastPastBase !== b.base;
   // Derive decorations from this buffer, never from the previously active file.
-  const d = marks(b.changes, b.base, editor.state.doc, true);
+  if (
+    !pastMarks ||
+    pastMarks.buffer !== b ||
+    pastMarks.revision !== b.revision ||
+    pastMarks.epoch !== b.diffEpoch ||
+    pastMarks.whitespace !== whitespace
+  ) {
+    pastMarks = {
+      buffer: b,
+      revision: b.revision,
+      epoch: b.diffEpoch,
+      whitespace,
+      marks: marks(b.changes, b.base, editor.state.doc, true),
+    };
+  }
+  const d = pastMarks.marks;
   const extra = ranges.length
     ? ranges.map(([a, b]) =>
         a === b
@@ -825,8 +843,11 @@ function updatePast() {
             EditorView.scrollIntoView(
               ranges.length
                 ? EditorSelection.range(
-                    Math.min(...ranges.map((r) => r[0])),
-                    Math.max(...ranges.map((r) => r[1])),
+                    ranges.reduce(
+                      (min, [start]) => Math.min(min, start),
+                      Infinity,
+                    ),
+                    ranges.reduce((max, [, end]) => Math.max(max, end), 0),
                   )
                 : Math.min(target, b.base.length),
               {
@@ -843,12 +864,17 @@ function updatePast() {
   lastPastBase = b.base;
   void updateRestoreEnabled();
 }
+let overviewFrame = 0;
+function scheduleOverview() {
+  cancelAnimationFrame(overviewFrame);
+  overviewFrame = requestAnimationFrame(updateOverview);
+}
 function updateOverview() {
   const el = $(".overview");
   el.replaceChildren();
   if (!active) return;
   const height = Math.max(1, editor.contentHeight);
-  const current = editor.state.doc.toString();
+  const current = editor.state.doc;
   for (const c of active.changes) {
     if (!visible(c, active.base, current, whitespace)) continue;
     const tick = document.createElement("i");
@@ -972,20 +998,29 @@ function restoreChanges(changes: Change[]) {
 }
 function restore(c?: Change) {
   if (!active) return;
+  const selected = selectedChanges();
+  if (!c && selected.length) {
+    restoreChanges(selected);
+    return;
+  }
   c ??= changeAt(active.changes, editor.state.selection.main.head);
-  if (!c || c.a === c.aEnd || c.b === c.bEnd) return;
-  restoreChanges([c]);
+  if (c) restoreChanges([c]);
 }
 async function restoreMenu(changes: Change[], selection = false) {
   if (!active) return;
-  const path = active.path,
+  const buffer = active,
+    epoch = active.diffEpoch,
     revision = active.revision;
   const item = await MenuItem.new({
     text: selection
       ? `Restore ${changes.length} ${changes.length === 1 ? "change" : "changes"}`
       : `Restore '${active.base.slice(changes[0].a, changes[0].aEnd)}'`,
     action: () => {
-      if (active?.path === path && active.revision === revision)
+      if (
+        active === buffer &&
+        active.revision === revision &&
+        active.diffEpoch === epoch
+      )
         restoreChanges(changes);
     },
   });
@@ -994,12 +1029,17 @@ async function restoreMenu(changes: Change[], selection = false) {
 }
 async function pastRestoreMenu(c: Change) {
   if (!active) return;
-  const path = active.path,
+  const buffer = active,
+    epoch = active.diffEpoch,
     revision = active.revision;
   const item = await MenuItem.new({
     text: c.b === c.bEnd ? "Keep" : "Restore",
     action: () => {
-      if (active?.path === path && active.revision === revision)
+      if (
+        active === buffer &&
+        active.revision === revision &&
+        active.diffEpoch === epoch
+      )
         restoreChanges([c]);
     },
   });
@@ -1009,7 +1049,7 @@ let restoreEnabled = false;
 async function updateRestoreEnabled() {
   const c =
     active && changeAt(active.changes, editor.state.selection.main.head);
-  const enabled = !!c && c.aEnd > c.a && c.bEnd > c.b;
+  const enabled = !!c || selectedChanges().length > 0;
   if (enabled !== restoreEnabled) {
     restoreEnabled = enabled;
     await syncMenuState();
@@ -1019,14 +1059,25 @@ async function save(b = active) {
   if (!b) return;
   await flush(b);
   try {
-    const d = await invoke<Document>("save_document", { path: b.path });
+    const d = await invoke<Pick<Document, "disk">>("save_document", {
+      path: b.path,
+    });
     b.disk = d.disk;
     b.diskDoc = Text.of((d.disk ?? "").split("\n"));
     if (active === b) {
       updateTitle();
       updateStatus();
     }
-    updateFileIndicator(b);
+    if (repo) {
+      const changed = new Set(repo.changed);
+      if (
+        b.state.doc.toString() !== b.base ||
+        b.baseExists !== (b.disk !== null)
+      )
+        changed.add(b.path);
+      repo = { ...repo, changed: [...changed].sort() };
+    }
+    renderTree();
   } catch (e) {
     if (String(e).includes("EXTERNAL_CHANGE")) {
       const choice = await choose(
@@ -1041,31 +1092,47 @@ async function save(b = active) {
   return true;
 }
 async function resolve(b: BufferState, reload: boolean) {
-  await flush(b);
-  const d = await invoke<Document>("resolve_document", {
-    path: b.path,
-    reload,
-  });
-  b.disk = d.disk;
-  b.diskDoc = Text.of((d.disk ?? "").split("\n"));
-  b.base = d.base;
-  b.version = d.version;
-  if (reload) {
-    const head = b.state.selection.main.head;
-    const scroll = active === b ? editor.scrollDOM.scrollTop : b.scroll;
-    b.state = makeState(d.text);
-    b.state = b.state.update({
-      selection: { anchor: Math.min(head, b.state.doc.length) },
-    }).state;
-    b.revision++;
-    if (active === b) {
-      editor.setState(b.state);
-      editor.scrollDOM.scrollTop = scroll;
+  const wasLocked = b.locked;
+  b.locked = true;
+  try {
+    await flush(b);
+    const result = await invoke<{
+      document: Document;
+      diff: DiffUpdate["diff"];
+    }>("resolve_document", {
+      path: b.path,
+      reload,
+      version: b.version,
+    });
+    const d = result.document;
+    b.changes = result.diff.changes;
+    b.micros = result.diff.micros;
+    b.diffEpoch++;
+    b.disk = d.disk;
+    b.diskDoc = Text.of((d.disk ?? "").split("\n"));
+    b.base = d.base;
+    b.baseExists = d.baseExists;
+    b.head = d.head;
+    b.version = d.version;
+    if (reload) {
+      const head = b.state.selection.main.head;
+      const scroll = active === b ? editor.scrollDOM.scrollTop : b.scroll;
+      b.state = makeState(d.text);
+      b.state = b.state.update({
+        selection: { anchor: Math.min(head, b.state.doc.length) },
+      }).state;
+      b.revision++;
+      if (active === b) {
+        editor.setState(b.state);
+        editor.scrollDOM.scrollTop = scroll;
+      }
     }
+    if (active === b) applyDiff(b);
+    updateTitle();
+    renderTree();
+  } finally {
+    b.locked = wasLocked;
   }
-  await refreshDiff(b);
-  updateTitle();
-  renderTree();
 }
 async function saveAll() {
   for (const b of buffers.values())
@@ -1081,20 +1148,6 @@ async function canClose() {
   );
   return c === "Discard" || (c === "Save All" && (await saveAll()));
 }
-async function refreshDiff(b: BufferState) {
-  await flush(b);
-  const revision = b.revision;
-  const result = await invoke<{ version: number; diff: Diff }>(
-    "document_diff",
-    { path: b.path },
-  );
-  if (result.version === b.version && revision === b.revision && !b.pending) {
-    b.changes = result.diff.changes;
-    b.diffEpoch++;
-    b.micros = result.diff.micros;
-    if (active === b) applyDiff(b);
-  }
-}
 let refreshFlight: Promise<void> | null = null;
 function foreground(force = false): Promise<void> {
   if (operationBusy && !force) return Promise.resolve();
@@ -1108,26 +1161,48 @@ async function performForeground() {
   if (!repo || refreshing || closing) return;
   refreshing = true;
   try {
+    const previousIndex = repo.index;
     repo = await invoke<Repo>("refresh");
+    if (repo.index !== previousIndex) {
+      for (const b of buffers.values()) {
+        b.selection = null;
+        b.index = "";
+      }
+    }
     $("#branch").textContent = `Branch: ${repo.branch}`;
     for (const b of buffers.values()) {
-      await flush(b);
-      const d = await invoke<Document>("inspect_document", { path: b.path });
-      const baseChanged = b.base !== d.base;
-      b.base = d.base;
-      if (d.disk !== b.disk) {
-        if (dirty(b)) {
-          const c = await choose(
-            `${b.path} was changed or deleted outside DiffEdit.`,
-            ["Cancel", "Keep Buffer", "Reload"],
-          );
-          if (c !== "Cancel") await resolve(b, c === "Reload");
-        } else await resolve(b, true);
-      } else if (baseChanged) await refreshDiff(b);
+      // Inspection does not block typing. Retry obsolete snapshots and install
+      // the baseline and its derived ranges in one synchronous step.
+      while (true) {
+        await flush(b);
+        const revision = b.revision;
+        const d = await invoke<
+          Omit<Document, "path" | "text"> & { diff: DiffUpdate["diff"] | null }
+        >("inspect_document", { path: b.path, head: b.head });
+        if (revision !== b.revision || d.version !== b.version) continue;
+        b.base = d.base;
+        b.baseExists = d.baseExists;
+        b.head = d.head;
+        if (d.diff) {
+          b.changes = d.diff.changes;
+          b.micros = d.diff.micros;
+          b.diffEpoch++;
+        }
+        if (active === b && d.diff) applyDiff(b);
+        if (d.disk !== b.disk) {
+          if (dirty(b)) {
+            const c = await choose(
+              `${b.path} was changed or deleted outside DiffEdit.`,
+              ["Cancel", "Keep Buffer", "Reload"],
+            );
+            if (c !== "Cancel") await resolve(b, c === "Reload");
+          } else await resolve(b, true);
+        }
+        break;
+      }
     }
     renderTree();
-  } catch (e) {
-    fail(e);
+    if (mode() === "stage" && active) await renderStage();
   } finally {
     refreshing = false;
   }
@@ -1241,16 +1316,19 @@ function renderQuick() {
 }
 $(".quick-list").onscroll = () => renderQuick();
 async function navigate(direction: number, file = false) {
+  repoMembership();
   if (!repo) return;
   const paths = repo.files.filter(
     (p) =>
-      repo!.changed.includes(p) ||
-      (buffers.has(p) && buffers.get(p)!.changes.length),
+      changedPaths.has(p) || (buffers.has(p) && buffers.get(p)!.changes.length),
   );
   if (!file && active) {
     const pos = editor.state.selection.main.head;
-    const candidates = active.changes.filter((c) =>
-      direction > 0 ? c.b > pos : c.b < pos,
+    const text = editor.state.doc;
+    const candidates = active.changes.filter(
+      (c) =>
+        visible(c, active!.base, text, whitespace) &&
+        (direction > 0 ? c.b > pos : c.b < pos),
     );
     const c = direction > 0 ? candidates[0] : candidates.at(-1);
     if (c) {
@@ -1260,15 +1338,28 @@ async function navigate(direction: number, file = false) {
   }
   if (!paths.length) return;
   const i = active ? paths.indexOf(active.path) : -1;
-  await activate(paths[(i + direction + paths.length) % paths.length]);
-  const c = direction > 0 ? active?.changes[0] : active?.changes.at(-1);
+  const target =
+    paths[
+      i < 0
+        ? direction > 0
+          ? 0
+          : paths.length - 1
+        : (i + direction + paths.length) % paths.length
+    ];
+  await activate(target);
+  if (!active || active.path !== target) return;
+  const current = editor.state.doc;
+  const changes = active.changes.filter((c) =>
+    visible(c, active!.base, current, whitespace),
+  );
+  const c = direction > 0 ? changes[0] : changes.at(-1);
   if (c) jump(c.b);
 }
 async function navigateLocal(direction: number, byLine: boolean) {
   if (!active) return;
   await flush(active);
   const lines = new Set<number>();
-  const currentText = editor.state.doc.toString();
+  const currentText = editor.state.doc;
   for (const c of active.changes) {
     if (!visible(c, active.base, currentText, whitespace)) continue;
     const start = editor.state.doc.lineAt(c.b).number,
@@ -1318,6 +1409,7 @@ function setMode(value: string) {
 function showMode() {
   scheduleMenuState();
   const staging = mode() === "stage";
+  if (staging) $(".search").hidden = true;
   $(".commit-box").hidden = !staging;
   $("#branch").hidden = !staging;
   renderTree();
@@ -1325,162 +1417,248 @@ function showMode() {
   $(".stage").hidden = !active || !staging;
   if (active && staging) void renderStage().catch(fail);
   if (!staging) {
+    ++stageGeneration;
+    clearVirtualRows($(".stage"));
+    if (active) active.rows = [];
     updatePast();
     // Editors may have been initialized or switched while their container was hidden.
     editor.requestMeasure();
     past.requestMeasure();
   }
 }
+async function loadStage(b: BufferState) {
+  await flush(b);
+  const revision = b.revision,
+    head = b.head;
+  const snapshot = await invoke<StageSnapshot>("stage_rows", { path: b.path });
+  if (
+    b.revision !== revision ||
+    b.head !== head ||
+    snapshot.version !== b.version ||
+    snapshot.head !== b.head
+  )
+    throw Error("Document changed during staging review; try again");
+  const available = new Set(snapshot.rows.flatMap((r) => (r.id ? [r.id] : [])));
+  if (b.index && b.index !== snapshot.index && b.selection !== null) {
+    b.selection = null;
+    b.index = "";
+    throw Error("Git staging changed; review the selection again");
+  }
+  if (b.selection === null) {
+    b.selection = new Set(snapshot.selected);
+  } else {
+    b.selection = new Set([...b.selection].filter((id) => available.has(id)));
+  }
+  b.rows = snapshot.rows;
+  b.rowIds = [...available];
+  b.index = snapshot.index;
+}
+function selectionFor(b: BufferState) {
+  return {
+    path: b.path,
+    version: b.version,
+    head: b.head,
+    selected: [...(b.selection ?? [])],
+  };
+}
+let stageGeneration = 0;
 async function renderStage() {
+  const generation = ++stageGeneration;
+  clearVirtualRows($(".stage"));
   const b = active;
   if (!b) return;
   await flush(b);
   const revision = b.revision;
-  const rows = await invoke<StageRow[]>("stage_rows", { path: b.path });
-  if (active !== b || b.revision !== revision) return;
-  const previouslyExcluded = new Set(
-    b.rows.flatMap((r) => (r.id && !b.selection?.has(r.id) ? [r.id] : [])),
-  );
-  b.rows = rows;
-  const available = rows.flatMap((r) => (r.id ? [r.id] : []));
-  if (b.selection === null) b.selection = new Set(available);
-  else
-    b.selection = new Set(
-      available.filter((id) => !previouslyExcluded.has(id)),
-    );
+  await loadStage(b);
+  if (
+    generation !== stageGeneration ||
+    active !== b ||
+    b.revision !== revision ||
+    mode() !== "stage"
+  )
+    return;
+  const rows = b.rows;
   const el = $(".stage");
   el.replaceChildren();
   let paint: boolean | null = null;
   let lastPaint = -1;
   const setters = new Map<number, (v: boolean, render?: boolean) => void>();
-  let skip = false;
+  const displayed: (number | null)[] = [];
+  let lastChange = -100,
+    nextChange = 0;
+  const changed = rows.flatMap((r, i) => (r.id ? [i] : []));
+  let gap = false;
   rows.forEach((r, i) => {
-    if (
-      r.kind === "equal" &&
-      !rows.slice(Math.max(0, i - 3), i + 4).some((x) => x.kind !== "equal")
-    ) {
-      if (!skip) {
+    while (nextChange < changed.length && changed[nextChange] < i)
+      lastChange = changed[nextChange++];
+    const near =
+      i - lastChange <= 3 || (changed[nextChange] ?? Infinity) - i <= 3;
+    if (r.kind === "equal" && !near) {
+      if (!gap) displayed.push(null);
+      gap = true;
+    } else {
+      displayed.push(i);
+      gap = false;
+    }
+  });
+  virtualRows(
+    el,
+    displayed.length,
+    font * 1.55 + 6,
+    (index) => {
+      const i = displayed[index];
+      if (i === null) {
         const gap = document.createElement("div");
         gap.textContent = "             ⋯";
-        el.append(gap);
-        skip = true;
+        return gap;
       }
-      return;
-    }
-    skip = false;
-    const row = document.createElement("div");
-    row.className = "stage-row " + r.kind;
-    const check = document.createElement("input");
-    check.type = "checkbox";
-    check.disabled = !r.id;
-    check.checked = !!r.id && b.selection!.has(r.id);
-    check.style.visibility = r.id ? "visible" : "hidden";
-    row.classList.toggle("off", !!r.id && !check.checked);
-    const numbers = document.createElement("span");
-    numbers.className = "numbers";
-    numbers.textContent = `${r.oldLine ?? ""} ${r.newLine ?? ""}`;
-    const code = document.createElement("span");
-    code.className = "code";
-    code.textContent =
-      (r.kind === "delete" ? "−" : r.kind === "insert" ? "+" : " ") +
-      r.text.replace(/\n$/, "");
-    row.append(check, numbers, code);
-    const set = (v: boolean, render = true) => {
-      if (!r.id) return;
-      v ? b.selection!.add(r.id) : b.selection!.delete(r.id);
-      check.checked = v;
-      row.classList.toggle("off", !v);
-      if (render) renderTree();
-    };
-    setters.set(i, set);
-    row.onpointerdown = (e) => {
-      if (!r.id || e.button !== 0) return;
-      e.preventDefault();
-      lastPaint = i;
-      paint = !check.checked;
-      set(paint);
-    };
-    row.onpointerenter = (e) => {
-      if (e.buttons === 1 && paint !== null) {
-        for (let j = Math.min(lastPaint, i); j <= Math.max(lastPaint, i); j++)
-          setters.get(j)?.(paint, false);
-        renderTree();
+      const r = rows[i];
+      const row = document.createElement("div");
+      row.className = "stage-row " + r.kind;
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.disabled = !r.id;
+      check.checked = !!r.id && b.selection!.has(r.id);
+      check.style.visibility = r.id ? "visible" : "hidden";
+      row.classList.toggle("off", !!r.id && !check.checked);
+      const numbers = document.createElement("span");
+      numbers.className = "numbers";
+      numbers.textContent = `${r.oldLine ?? ""} ${r.newLine ?? ""}`;
+      const code = document.createElement("span");
+      code.className = "code";
+      code.textContent =
+        (r.kind === "delete" ? "−" : r.kind === "insert" ? "+" : " ") +
+        r.text.replace(/\n$/, "");
+      row.append(check, numbers, code);
+      const set = (v: boolean, render = true) => {
+        if (!r.id) return;
+        v ? b.selection!.add(r.id) : b.selection!.delete(r.id);
+        check.checked = v;
+        row.classList.toggle("off", !v);
+        if (render) renderTree();
+      };
+      setters.set(i, set);
+      row.onpointerdown = (e) => {
+        if (!r.id || e.button !== 0) return;
+        e.preventDefault();
+        const resetPaint = () => {
+          paint = null;
+          window.removeEventListener("pointerup", resetPaint);
+          window.removeEventListener("pointercancel", resetPaint);
+        };
+        window.addEventListener("pointerup", resetPaint);
+        window.addEventListener("pointercancel", resetPaint);
         lastPaint = i;
-      }
-    };
-    row.onpointerup = () => (paint = null);
-    check.onchange = () => set(check.checked);
-    check.oncontextmenu = (e) => {
-      if (!r.id) return;
-      e.preventDefault();
-      const revision = b.revision;
-      void (async () => {
-        const items = await Promise.all(
-          [true, false].map((above) =>
-            MenuItem.new({
-              text: above
-                ? "Check this and all above"
-                : "Uncheck this and all below",
-              action: () => {
-                if (active !== b || b.revision !== revision) return;
-                for (const entry of rows.slice(
-                  above ? 0 : i,
-                  above ? i + 1 : rows.length,
-                ))
-                  if (entry.id) {
-                    above
-                      ? b.selection!.add(entry.id)
-                      : b.selection!.delete(entry.id);
-                  }
-                void renderStage();
-                renderTree();
-              },
-            }),
-          ),
-        );
-        await (await Menu.new({ items })).popup();
-      })().catch(fail);
-    };
-    el.append(row);
-  });
+        paint = !check.checked;
+        set(paint);
+      };
+      row.onpointerenter = (e) => {
+        if (e.buttons === 1 && paint !== null) {
+          for (
+            let j = Math.min(lastPaint, i);
+            j <= Math.max(lastPaint, i);
+            j++
+          ) {
+            const id = rows[j].id;
+            if (id) {
+              paint ? b.selection!.add(id) : b.selection!.delete(id);
+            }
+            setters.get(j)?.(paint, false);
+          }
+          renderTree();
+          lastPaint = i;
+        }
+      };
+      row.onpointerup = () => (paint = null);
+      check.onchange = () => set(check.checked);
+      check.oncontextmenu = (e) => {
+        if (!r.id) return;
+        e.preventDefault();
+        const revision = b.revision;
+        void (async () => {
+          const items = await Promise.all(
+            [true, false].map((above) =>
+              MenuItem.new({
+                text: above
+                  ? "Check this and all above"
+                  : "Uncheck this and all below",
+                action: () => {
+                  if (
+                    active !== b ||
+                    b.revision !== revision ||
+                    b.rows !== rows
+                  )
+                    return;
+                  for (const entry of rows.slice(
+                    above ? 0 : i,
+                    above ? i + 1 : rows.length,
+                  ))
+                    if (entry.id) {
+                      above
+                        ? b.selection!.add(entry.id)
+                        : b.selection!.delete(entry.id);
+                    }
+                  void renderStage();
+                  renderTree();
+                },
+              }),
+            ),
+          );
+          await (await Menu.new({ items })).popup();
+        })().catch(fail);
+      };
+      return row;
+    },
+    () => setters.clear(),
+  );
 }
 async function stage() {
   if (operationBusy || !active) return;
-  const b = active;
-  await flush(b);
-  await invoke("stage_selected", {
-    path: b.path,
-    selected: [...(b.selection || [])],
-    version: b.version,
-  });
-  repo = await invoke<Repo>("refresh");
-  renderTree();
-  status(`Staged selected lines in ${b.path}`);
+  busy("Staging…");
+  try {
+    const b = active;
+    await loadStage(b);
+    await invoke("stage_selected", {
+      selection: selectionFor(b),
+      index: b.index,
+    });
+    repo = await invoke<Repo>("refresh");
+    for (const buffer of buffers.values())
+      if (buffer.index) buffer.index = repo.index;
+    renderTree();
+    status(`Staged selected lines in ${b.path}`);
+  } finally {
+    busy(null);
+  }
 }
 async function commit() {
   if (operationBusy || !repo) return;
   busy("Committing…");
   try {
     if (refreshFlight) await refreshFlight;
-    for (const b of buffers.values()) await flush(b);
     const message =
       $<HTMLInputElement>("#summary").value +
       "\n\n" +
       $<HTMLTextAreaElement>("#body").value;
-    if (active) await renderStage();
-    const selected = active
-      ? {
-          path: active.path,
-          version: active.version,
-          selected: [
-            ...(active.selection ??
-              new Set(active.rows.flatMap((r) => (r.id ? [r.id] : [])))),
-          ],
-        }
-      : null;
+    if (!message.trim()) throw Error("Enter a commit summary");
+    const paths = new Set([
+      ...repo.changed,
+      ...[...buffers.values()].filter(dirty).map((b) => b.path),
+    ]);
+    const reviewed: BufferState[] = [];
+    let index: string | null = null;
+    for (const path of paths) {
+      const b = await loadBuffer(path);
+      await loadStage(b);
+      if (index !== null && index !== b.index)
+        throw Error("Git staging changed during review; try again");
+      index = b.index;
+      reviewed.push(b);
+    }
     const output = await invoke<string>("commit_changes", {
       message,
-      selection: selected,
+      selections: reviewed.map(selectionFor),
+      index: index ?? repo.index,
     });
     $<HTMLInputElement>("#summary").value = "";
     $<HTMLTextAreaElement>("#body").value = "";
@@ -1517,10 +1695,7 @@ async function action(id: string) {
       await invoke("request_quit");
       break;
     case "close":
-      if (await canClose()) {
-        closing = true;
-        await win.destroy();
-      }
+      await closeWindow();
       break;
     case "quick":
       quickOpen();
@@ -1691,6 +1866,7 @@ $(".divider").onpointerdown = (e) => {
 document.addEventListener(
   "keydown",
   (e) => {
+    if (document.querySelector("dialog[open]")) return;
     if (operationBusy) {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -1745,29 +1921,41 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-void listen("quit-cancelled", () => {
-  if (!quitPending) return;
-  quitPending = false;
-  busy(null);
-});
-void listen("request-quit", async () => {
-  if (operationBusy) {
-    await invoke("quit_response", { approved: false });
-    return;
-  }
-  quitPending = true;
-  busy("Waiting for windows to finish closing…");
-  try {
-    await invoke("quit_response", { approved: await canClose() });
-  } catch (e) {
-    await invoke("quit_response", { approved: false });
-    fail(e);
-  }
-});
+const quitCancelledListener = listen<number>(
+  "quit-cancelled",
+  ({ payload }) => {
+    if (quitPending !== payload) return;
+    quitPending = null;
+    busy(null);
+  },
+);
+const quitRequestListener = listen<number>(
+  "request-quit",
+  async ({ payload: attempt }) => {
+    if (quitPending === attempt) return;
+    if (operationBusy) {
+      await invoke("quit_response", { approved: false, attempt });
+      return;
+    }
+    quitPending = attempt;
+    busy("Waiting for windows to finish closing…");
+    try {
+      if (refreshFlight) await refreshFlight;
+      const approved = await canClose();
+      await invoke("quit_response", { approved, attempt });
+    } catch (e) {
+      await invoke("quit_response", { approved: false, attempt });
+      fail(e);
+    }
+  },
+);
+void Promise.all([quitCancelledListener, quitRequestListener])
+  .then(() => invoke("frontend_ready"))
+  .catch(fail);
 void win.onFocusChanged(({ payload }) => {
   if (payload) {
     void syncMenuState(true).catch(fail);
-    void foreground();
+    void foreground().catch(fail);
   }
 });
 void win.onCloseRequested(async (e) => {
@@ -1777,16 +1965,28 @@ void win.onCloseRequested(async (e) => {
   }
   if (closing) return;
   e.preventDefault();
+  await closeWindow().catch(fail);
+});
+async function closeWindow() {
+  if (operationBusy || closing) return;
+  busy("Closing…");
   try {
+    if (refreshFlight) await refreshFlight;
     if (await canClose()) {
       closing = true;
-      await win.destroy();
+      try {
+        await win.destroy();
+      } catch (error) {
+        closing = false;
+        throw error;
+      }
     }
-  } catch (e) {
-    fail(e);
+  } finally {
+    if (!closing) busy(null);
   }
-});
+}
 function menuAvailability(): Record<string, boolean> {
+  repoMembership();
   const ready = !operationBusy && !quitPending && !closing;
   const editing = ready && !!active && mode() === "edit";
   const field =
@@ -1801,22 +2001,13 @@ function menuAvailability(): Record<string, boolean> {
   };
   const localChanges =
     editing &&
-    active!.changes.some(
-      (c) =>
-        whitespace ||
-        /\S/u.test(
-          active!.base.slice(c.a, c.aEnd) +
-            editor.state.doc.sliceString(c.b, c.bEnd),
-        ),
+    active!.changes.some((c) =>
+      visible(c, active!.base, editor.state.doc, whitespace),
     );
   const otherFiles =
     !!repo &&
-    repo.files.some(
-      (p) =>
-        p !== active?.path &&
-        (repo!.changed.includes(p) ||
-          (buffers.has(p) && dirty(buffers.get(p)!))),
-    );
+    ([...changedPaths].some((p) => p !== active?.path) ||
+      [...buffers.values()].some((b) => b !== active && dirty(b)));
   const c =
     active && changeAt(active.changes, editor.state.selection.main.head);
   const pos = editor.state.selection.main.head;
@@ -1844,9 +2035,7 @@ function menuAvailability(): Record<string, boolean> {
       editing &&
       !field &&
       !past.hasFocus &&
-      !!c &&
-      c.aEnd > c.a &&
-      c.bEnd > c.b,
+      (!!c || selectedChanges().length > 0),
     wrap: editing,
     whitespace: editing,
     larger: editing && font < 32,
@@ -1898,7 +2087,7 @@ void listen<string>("menu-action", ({ payload }) => {
 });
 void syncMenuState().catch(fail);
 
-let sidebarWidth = Number(localStorage.getItem("sidebarWidth")) || 240;
+let sidebarWidth = prefs.sidebarWidth;
 document.documentElement.style.setProperty("--sidebar", `${sidebarWidth}px`);
 $(".sidebar-divider").onpointerdown = (e) => {
   const x = e.clientX,

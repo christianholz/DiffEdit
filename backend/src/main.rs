@@ -1,7 +1,8 @@
 mod app_menu;
 mod diff;
+mod document;
 mod repository;
-use serde::{Deserialize, Serialize};
+use document::{Document, Edit, Inspection, Resolved, Saved, Selection, StageSnapshot, Update};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, HashSet},
@@ -10,18 +11,9 @@ use std::{
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Document {
-    path: String,
-    text: String,
-    base: String,
-    disk: Option<String>,
-    version: u64,
-}
 #[derive(Default)]
 struct Workspace {
-    repo: Option<repository::Repo>,
+    repo: Option<Arc<repository::Repo>>,
     documents: HashMap<String, Document>,
 }
 #[derive(Default, Clone)]
@@ -35,17 +27,6 @@ impl Service {
             .or_default()
             .clone()
     }
-}
-#[derive(Deserialize)]
-struct Edit {
-    from: usize,
-    to: usize,
-    insert: String,
-}
-#[derive(Serialize)]
-struct Update {
-    version: u64,
-    diff: diff::DiffResult,
 }
 async fn work<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, String> + Send + 'static,
@@ -176,29 +157,21 @@ async fn quick_matches(
 ) -> Result<Vec<String>, String> {
     let w = state.workspace(window.label());
     work(move || {
-        let files = w
-            .lock()
-            .unwrap()
-            .repo
-            .as_ref()
-            .map(|r| r.files.clone())
-            .unwrap_or_default();
+        let repo = w.lock().unwrap().repo.clone();
         let parts: Vec<_> = query.split_whitespace().map(str::to_lowercase).collect();
-        Ok(files
-            .into_iter()
-            .filter(|p| {
-                let p = p.to_lowercase();
-                parts.iter().all(|q| p.contains(q))
+        Ok(repo
+            .as_ref()
+            .map(|r| {
+                r.files
+                    .iter()
+                    .zip(&r.search)
+                    .filter(|(_, lower)| parts.iter().all(|q| lower.contains(q)))
+                    .map(|(path, _)| path.clone())
+                    .collect()
             })
-            .collect())
+            .unwrap_or_default())
     })
     .await
-}
-#[derive(Deserialize)]
-struct CommitSelection {
-    path: String,
-    version: u64,
-    selected: HashSet<String>,
 }
 #[tauri::command]
 fn resize_grid(window: tauri::Window, line: f64, delta: f64) -> Result<(), String> {
@@ -265,7 +238,7 @@ async fn open_folder(
         let r = repository::discover(&root)?;
         let mut w = w.lock().unwrap();
         w.documents.clear();
-        w.repo = Some(r.clone());
+        w.repo = Some(Arc::new(r.clone()));
         Ok(r)
     })
     .await
@@ -277,9 +250,18 @@ async fn refresh(
 ) -> Result<repository::Repo, String> {
     let w = state.workspace(window.label());
     work(move || {
+        let previous = w
+            .lock()
+            .unwrap()
+            .repo
+            .clone()
+            .ok_or("Open a folder first")?;
+        let r = repository::discover(&previous.root)?;
         let mut w = w.lock().unwrap();
-        let r = repository::discover(&w.repo.as_ref().ok_or("Open a folder first")?.root)?;
-        w.repo = Some(r.clone());
+        if !w.repo.as_ref().is_some_and(|p| Arc::ptr_eq(p, &previous)) {
+            return Err("Workspace changed during refresh".into());
+        }
+        w.repo = Some(Arc::new(r.clone()));
         Ok(r)
     })
     .await
@@ -292,21 +274,23 @@ async fn open_document(
 ) -> Result<Document, String> {
     let w = state.workspace(window.label());
     work(move || {
-        let mut w = w.lock().unwrap();
-        if let Some(d) = w.documents.get(&path) {
-            return Ok(d.clone());
-        }
-        let r = w.repo.as_ref().ok_or("Open a folder first")?;
-        let disk = repository::disk(r, &path)?;
-        let d = Document {
-            path: path.clone(),
-            text: disk.clone().unwrap_or_default(),
-            base: repository::base(r, &path)?,
-            disk,
-            version: 0,
+        let repo = {
+            let w = w.lock().unwrap();
+            if let Some(d) = w.documents.get(&path) {
+                return Ok(d.clone());
+            }
+            w.repo.clone().ok_or("Open a folder first")?
         };
-        w.documents.insert(path, d.clone());
-        Ok(d)
+        let d = Document::open(&repo, path.clone())?;
+        let mut w = w.lock().unwrap();
+        if !w
+            .repo
+            .as_ref()
+            .is_some_and(|r| r.root == repo.root && r.head == repo.head)
+        {
+            return Err("Workspace changed while opening file".into());
+        }
+        Ok(w.documents.entry(path).or_insert(d).clone())
     })
     .await
 }
@@ -320,29 +304,35 @@ async fn edit_document(
 ) -> Result<Update, String> {
     let w = state.workspace(window.label());
     work(move || {
-        let (text, base) = {
+        let snapshot = {
             let mut w = w.lock().unwrap();
             let d = w.documents.get_mut(&path).ok_or("Document not open")?;
-            if version != d.version + 1 {
-                return Err("Document version mismatch".into());
-            }
-            let mut next = d.text.clone();
-            for e in edits.iter().rev() {
-                let from = diff::byte_at(&next, e.from)?;
-                let to = diff::byte_at(&next, e.to)?;
-                if to < from {
-                    return Err("Invalid edit".into());
-                }
-                next.replace_range(from..to, &e.insert);
-            }
-            d.text = next;
-            d.version = version;
-            (d.text.clone(), d.base.clone())
+            d.edit(version, &edits)?;
+            d.diff_input()
         };
-        Ok(Update {
-            version,
-            diff: diff::compute(&base, &text),
-        })
+        Ok(snapshot.update())
+    })
+    .await
+}
+#[tauri::command]
+async fn sync_document(
+    window: tauri::Window,
+    state: tauri::State<'_, Service>,
+    path: String,
+    text: String,
+) -> Result<Update, String> {
+    let w = state.workspace(window.label());
+    work(move || {
+        let snapshot = {
+            let mut w = w.lock().unwrap();
+            let d = w.documents.get_mut(&path).ok_or("Document not open")?;
+            if d.text != text {
+                d.text = text;
+                d.version += 1;
+            }
+            d.diff_input()
+        };
+        Ok(snapshot.update())
     })
     .await
 }
@@ -360,11 +350,8 @@ async fn document_diff(
             .documents
             .get(&path)
             .ok_or("Document not open")?
-            .clone();
-        Ok(Update {
-            version: d.version,
-            diff: diff::compute(&d.base, &d.text),
-        })
+            .diff_input();
+        Ok(d.update())
     })
     .await
 }
@@ -373,18 +360,40 @@ async fn inspect_document(
     window: tauri::Window,
     state: tauri::State<'_, Service>,
     path: String,
-) -> Result<Document, String> {
+    head: Option<String>,
+) -> Result<Inspection, String> {
     let w = state.workspace(window.label());
     work(move || {
-        let mut w = w.lock().unwrap();
-        let r = w.repo.as_ref().ok_or("No repository")?.clone();
-        let base = repository::base(&r, &path)?;
-        let disk = repository::disk(&r, &path)?;
-        let d = w.documents.get_mut(&path).ok_or("Document not open")?;
-        d.base = base;
-        let mut result = d.clone();
-        result.disk = disk;
-        Ok(result)
+        let repo = w.lock().unwrap().repo.clone().ok_or("No repository")?;
+        let base = repository::base_entry(&repo, &path)?;
+        let base_exists = base.is_some();
+        let base = base.unwrap_or_default();
+        let disk = repository::disk(&repo, &path)?;
+        let (version, changed_text) = {
+            let mut w = w.lock().unwrap();
+            if !w
+                .repo
+                .as_ref()
+                .is_some_and(|r| r.root == repo.root && r.head == repo.head)
+            {
+                return Err("Repository changed during inspection".into());
+            }
+            let d = w.documents.get_mut(&path).ok_or("Document not open")?;
+            let changed = d.base != base || head != repo.head;
+            d.base = base.clone();
+            d.base_exists = base_exists;
+            d.head = repo.head.clone();
+            (d.version, changed.then(|| d.text.clone()))
+        };
+        let diff = changed_text.map(|text| diff::compute(&base, &text));
+        Ok(Inspection {
+            base,
+            base_exists,
+            head: repo.head.clone(),
+            disk,
+            version,
+            diff,
+        })
     })
     .await
 }
@@ -394,19 +403,26 @@ async fn resolve_document(
     state: tauri::State<'_, Service>,
     path: String,
     reload: bool,
-) -> Result<Document, String> {
+    version: u64,
+) -> Result<Resolved, String> {
     let w = state.workspace(window.label());
     work(move || {
-        let mut w = w.lock().unwrap();
-        let r = w.repo.as_ref().ok_or("No repository")?.clone();
+        let r = w.lock().unwrap().repo.clone().ok_or("No repository")?;
         let disk = repository::disk(&r, &path)?;
+        let mut w = w.lock().unwrap();
         let d = w.documents.get_mut(&path).ok_or("Document not open")?;
+        if d.version != version {
+            return Err("Document changed before reload".into());
+        }
         d.disk = disk;
         if reload {
             d.text = d.disk.clone().unwrap_or_default();
             d.version += 1;
         }
-        Ok(d.clone())
+        let document = d.clone();
+        drop(w);
+        let diff = diff::compute(&document.base, &document.text);
+        Ok(Resolved { document, diff })
     })
     .await
 }
@@ -415,15 +431,27 @@ async fn save_document(
     window: tauri::Window,
     state: tauri::State<'_, Service>,
     path: String,
-) -> Result<Document, String> {
+) -> Result<Saved, String> {
     let w = state.workspace(window.label());
     work(move || {
-        let mut w = w.lock().unwrap();
-        let r = w.repo.as_ref().ok_or("No repository")?.clone();
-        let d = w.documents.get_mut(&path).ok_or("Document not open")?;
-        repository::save(&r, &path, &d.text, &d.disk)?;
-        d.disk = Some(d.text.clone());
-        Ok(d.clone())
+        let (repo, mut snapshot) = {
+            let w = w.lock().unwrap();
+            (
+                w.repo.clone().ok_or("No repository")?,
+                w.documents.get(&path).ok_or("Document not open")?.clone(),
+            )
+        };
+        repository::save(&repo, &path, &snapshot.text, &snapshot.disk)?;
+        snapshot.disk = Some(snapshot.text.clone());
+        w.lock()
+            .unwrap()
+            .documents
+            .get_mut(&path)
+            .ok_or("Document not open")?
+            .disk = snapshot.disk.clone();
+        Ok(Saved {
+            disk: snapshot.disk,
+        })
     })
     .await
 }
@@ -432,17 +460,17 @@ async fn stage_rows(
     window: tauri::Window,
     state: tauri::State<'_, Service>,
     path: String,
-) -> Result<Vec<diff::StageRow>, String> {
+) -> Result<StageSnapshot, String> {
     let w = state.workspace(window.label());
     work(move || {
-        let d = w
-            .lock()
-            .unwrap()
-            .documents
-            .get(&path)
-            .ok_or("Document not open")?
-            .clone();
-        Ok(diff::stage_rows(&d.base, &d.text))
+        let (repo, d) = {
+            let w = w.lock().unwrap();
+            (
+                w.repo.as_ref().ok_or("No repository")?.clone(),
+                w.documents.get(&path).ok_or("Document not open")?.clone(),
+            )
+        };
+        d.stage_snapshot(&repo)
     })
     .await
 }
@@ -450,24 +478,14 @@ async fn stage_rows(
 async fn stage_selected(
     window: tauri::Window,
     state: tauri::State<'_, Service>,
-    path: String,
-    selected: HashSet<String>,
-    version: u64,
+    selection: Selection,
+    index: String,
 ) -> Result<(), String> {
     let w = state.workspace(window.label());
     work(move || {
-        let w = w.lock().unwrap();
-        let r = w.repo.as_ref().ok_or("No repository")?;
-        let d = w.documents.get(&path).ok_or("Document not open")?;
-        if d.version != version {
-            return Err("Document changed; review the staging selection again".into());
-        }
-        let rows = diff::stage_rows(&d.base, &d.text);
-        let available: HashSet<_> = rows.iter().filter_map(|r| r.id.clone()).collect();
-        if !selected.is_subset(&available) {
-            return Err("Changes updated; review the selection again".into());
-        }
-        repository::stage(r, &path, &diff::staged_text(&rows, &selected))
+        let PreparedSelection { repo, entries } =
+            prepare_selection(&w.lock().unwrap(), &[selection])?;
+        repository::apply_selection(&repo, &index, &entries, None).map(|_| ())
     })
     .await
 }
@@ -476,58 +494,59 @@ async fn commit_changes(
     window: tauri::Window,
     state: tauri::State<'_, Service>,
     message: String,
-    selection: Option<CommitSelection>,
+    selections: Vec<Selection>,
+    index: String,
 ) -> Result<String, String> {
     let w = state.workspace(window.label());
     work(move || {
-        let w = w.lock().unwrap();
-        commit_workspace(&w, &message, selection)
+        let PreparedSelection { repo, entries } =
+            prepare_selection(&w.lock().unwrap(), &selections)?;
+        repository::apply_selection(&repo, &index, &entries, Some(&message))
     })
     .await
 }
-fn commit_workspace(
-    w: &Workspace,
-    message: &str,
-    selection: Option<CommitSelection>,
-) -> Result<String, String> {
+struct PreparedSelection {
+    repo: Arc<repository::Repo>,
+    entries: Vec<(String, Option<String>)>,
+}
+fn prepare_selection(w: &Workspace, selections: &[Selection]) -> Result<PreparedSelection, String> {
     let repo = w.repo.as_ref().ok_or("No repository")?;
-    if message.trim().is_empty() {
-        return Err("Enter a commit summary".into());
-    }
-    repository::validate_commit(repo, message)?;
-    if let Some(selection) = selection {
+    let mut paths = HashSet::new();
+    let mut entries = Vec::new();
+    for selection in selections {
+        if !paths.insert(&selection.path) {
+            return Err("Duplicate selection path".into());
+        }
         let d = w
             .documents
             .get(&selection.path)
             .ok_or("Document not open")?;
-        if d.version != selection.version {
-            return Err("Document changed before commit".into());
+        if d.head != repo.head {
+            return Err("HEAD changed; refresh before committing".into());
         }
-        let rows = diff::stage_rows(&d.base, &d.text);
-        if rows.iter().any(|r| r.id.is_some()) {
-            repository::stage(
-                repo,
-                &selection.path,
-                &diff::staged_text(&rows, &selection.selected),
-            )?;
-        }
+        entries.push((selection.path.clone(), d.selected_text(selection)?));
     }
-    repository::commit(repo, &message)
+    Ok(PreparedSelection {
+        repo: repo.clone(),
+        entries,
+    })
 }
 #[derive(Default)]
 struct QuitState {
-    pending: Mutex<Option<HashSet<String>>>,
+    pending: Mutex<Option<(u64, HashSet<String>)>>,
+    next: std::sync::atomic::AtomicU64,
     allowed: AtomicBool,
 }
 fn begin_quit(app: &tauri::AppHandle) {
     let q = app.state::<QuitState>();
     let windows = app.webview_windows();
+    let attempt = q.next.fetch_add(1, Ordering::SeqCst) + 1;
     {
         let mut pending = q.pending.lock().unwrap();
         if pending.is_some() {
             return;
         }
-        *pending = Some(windows.keys().cloned().collect());
+        *pending = Some((attempt, windows.keys().cloned().collect()));
     }
     if windows.is_empty() {
         q.allowed.store(true, Ordering::SeqCst);
@@ -535,24 +554,43 @@ fn begin_quit(app: &tauri::AppHandle) {
         return;
     }
     for w in windows.values() {
-        let _ = w.emit("request-quit", ());
+        if w.emit("request-quit", attempt).is_err() {
+            *q.pending.lock().unwrap() = None;
+            let _ = app.emit("quit-cancelled", attempt);
+            break;
+        }
     }
+}
+#[tauri::command]
+fn frontend_ready(app: tauri::AppHandle, window: tauri::Window) -> Result<(), String> {
+    let q = app.state::<QuitState>();
+    let mut pending = q.pending.lock().unwrap();
+    if let Some((attempt, labels)) = pending.as_mut() {
+        labels.insert(window.label().to_owned());
+        window
+            .emit("request-quit", *attempt)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 #[tauri::command]
 fn request_quit(app: tauri::AppHandle) {
     begin_quit(&app)
 }
 #[tauri::command]
-fn quit_response(app: tauri::AppHandle, window: tauri::Window, approved: bool) {
+fn quit_response(app: tauri::AppHandle, window: tauri::Window, approved: bool, attempt: u64) {
     let q = app.state::<QuitState>();
     let mut pending = q.pending.lock().unwrap();
+    if pending.as_ref().map(|(id, _)| *id) != Some(attempt) {
+        return;
+    }
     if !approved {
         *pending = None;
         drop(pending);
-        let _ = app.emit("quit-cancelled", ());
+        let _ = app.emit("quit-cancelled", attempt);
         return;
     }
-    if let Some(labels) = pending.as_mut() {
+    if let Some((_, labels)) = pending.as_mut() {
         labels.remove(window.label());
         if labels.is_empty() {
             q.allowed.store(true, Ordering::SeqCst);
@@ -635,11 +673,13 @@ fn main() {
             route_folder,
             quick_matches,
             request_quit,
+            frontend_ready,
             quit_response,
             open_folder,
             refresh,
             open_document,
             edit_document,
+            sync_document,
             document_diff,
             inspect_document,
             resolve_document,
@@ -676,6 +716,22 @@ fn main() {
                 ..
             } = event
             {
+                let q = app.state::<QuitState>();
+                let mut pending = q.pending.lock().unwrap();
+                if let Some((_, labels)) = pending.as_mut() {
+                    labels.remove(&label);
+                }
+                let finished = pending
+                    .as_ref()
+                    .is_some_and(|(_, labels)| labels.is_empty());
+                if finished {
+                    *pending = None;
+                    q.allowed.store(true, Ordering::SeqCst);
+                }
+                drop(pending);
+                if finished {
+                    app.exit(0);
+                }
                 app.state::<Service>().0.lock().unwrap().remove(&label);
                 app.state::<FolderWindows>()
                     .0
@@ -690,81 +746,4 @@ fn main() {
 }
 
 #[cfg(test)]
-mod parity_tests {
-    use super::*;
-    #[test]
-    fn selected_commit_preserves_unselected_work_and_rejects_stale_versions() {
-        let root =
-            std::env::temp_dir().join(format!("diffedit-commit-parity-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout).unwrap()
-        };
-        git(&["init", "-q"]);
-        git(&["config", "user.name", "DiffEdit Test"]);
-        git(&["config", "user.email", "test@example.invalid"]);
-        let base = "old first\nunchanged anchor\nold second\n";
-        let text = "new first\nunchanged anchor\nnew second\n";
-        std::fs::write(root.join("a.txt"), base).unwrap();
-        git(&["add", "a.txt"]);
-        git(&["commit", "-qm", "initial"]);
-        std::fs::write(root.join("a.txt"), text).unwrap();
-        let w = Workspace {
-            repo: Some(repository::discover(root.to_str().unwrap()).unwrap()),
-            documents: HashMap::from([(
-                "a.txt".into(),
-                Document {
-                    path: "a.txt".into(),
-                    text: text.into(),
-                    base: base.into(),
-                    disk: Some(text.into()),
-                    version: 1,
-                },
-            )]),
-        };
-        let selected = diff::stage_rows(base, text)
-            .into_iter()
-            .filter(|r| r.old_line == Some(1) || r.new_line == Some(1))
-            .filter_map(|r| r.id)
-            .collect();
-        commit_workspace(
-            &w,
-            "selected",
-            Some(CommitSelection {
-                path: "a.txt".into(),
-                version: 1,
-                selected,
-            }),
-        )
-        .unwrap();
-        assert_eq!(
-            git(&["show", "HEAD:a.txt"]),
-            "new first\nunchanged anchor\nold second\n"
-        );
-        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), text);
-        let head = git(&["rev-parse", "HEAD"]);
-        assert!(commit_workspace(
-            &w,
-            "stale",
-            Some(CommitSelection {
-                path: "a.txt".into(),
-                version: 0,
-                selected: HashSet::new()
-            })
-        )
-        .is_err());
-        assert_eq!(git(&["rev-parse", "HEAD"]), head);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
+mod regression_tests;

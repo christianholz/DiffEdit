@@ -1,4 +1,5 @@
 import "./style.css";
+import { readPreferences } from "./preferences";
 import { invoke } from "@tauri-apps/api/core";
 
 const root = document.getElementById("app")!;
@@ -6,7 +7,7 @@ root.inert = true;
 // Restore the visible shell geometry before its first frame.
 document.documentElement.style.setProperty(
   "--sidebar",
-  `${Number(localStorage.getItem("sidebarWidth")) || 240}px`,
+  `${readPreferences(localStorage).sidebarWidth}px`,
 );
 performance.mark("shell-ready");
 // The static shell and its stylesheet exist before revealing the native window.

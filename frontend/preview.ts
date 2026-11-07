@@ -22,14 +22,20 @@ export function previewChanges(
   const edited: Array<[number, number]> = [];
   tr.changes.iterChanges((from, to, newFrom, newTo) => {
     edited.push([newFrom, newTo]);
-    const hits = previous.filter((c) => c.b <= to && c.bEnd >= from);
-    hits.forEach((c) => covered.add(c));
-    result.push({
-      a: Math.min(map(from), ...hits.map((c) => c.a)),
-      aEnd: Math.max(map(to, true), ...hits.map((c) => c.aEnd)),
-      b: Math.min(newFrom, ...hits.map((c) => tr.changes.mapPos(c.b, -1))),
-      bEnd: Math.max(newTo, ...hits.map((c) => tr.changes.mapPos(c.bEnd, 1))),
-    });
+    let a = map(from),
+      aEnd = map(to, true),
+      b = newFrom,
+      bEnd = newTo;
+    for (const c of previous) {
+      if (c.b > to) break;
+      if (c.bEnd < from) continue;
+      covered.add(c);
+      a = Math.min(a, c.a);
+      aEnd = Math.max(aEnd, c.aEnd);
+      b = Math.min(b, tr.changes.mapPos(c.b, -1));
+      bEnd = Math.max(bEnd, tr.changes.mapPos(c.bEnd, 1));
+    }
+    result.push({ a, aEnd, b, bEnd });
   });
   for (const c of previous)
     if (!covered.has(c))

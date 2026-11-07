@@ -28,7 +28,17 @@ Typing updates the editor and provisional highlights immediately. Edits are sent
 to Rust as they occur; versioned responses keep the final diff
 in sync with the current text. The diff engine combines line alignment with token
 and character refinement to retain useful context within changed paragraphs.
-File and Git operations run on background workers.
+File and Git operations run on background workers. Document edits have one writer
+per buffer; an interrupted acknowledgement recovers from a complete snapshot.
+Diff results and staging selections identify both the buffer version and HEAD.
+
+In Committing mode, checkboxes start from the existing Git index. Stage selected
+lines updates the active file's index entry. Commit staged changes applies the
+checked selections across all changed files, including unsaved buffers. Index
+updates use a locked temporary copy, so a failed validation or commit hook leaves
+the original index intact. Changes to HEAD or the index require renewed review.
+Symbolic links, merge conflicts, and permission changes are rejected by text
+staging; handle those with Git before reviewing text changes.
 
 ## Build and run
 

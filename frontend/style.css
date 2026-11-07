@@ -288,6 +288,7 @@ header .root {
   font-size: 11px;
 }
 .stage {
+  line-height: 1.55;
   flex: 1;
   min-height: 0;
   overflow: auto;
