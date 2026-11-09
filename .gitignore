@@ -3,3 +3,7 @@ node_modules/
 dist/
 backend/target/
 backend/gen/
+
+# Xcode keeps shared project/scheme files in Git, personal UI state stays local.
+xcuserdata/
+*.xcuserstate

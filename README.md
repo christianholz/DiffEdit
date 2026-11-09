@@ -52,6 +52,14 @@ npm ci
 npm run tauri -- dev
 ```
 
+To launch from Xcode, open `DiffEdit.xcodeproj`, select the **DiffEdit** scheme
+and **My Mac**, then press **Command-R**. The shared scheme builds the frontend
+and Rust app through Tauri, then launches the resulting application in Xcode.
+No Vite server or signing team is required. Rust artifacts go into Xcode's
+DerivedData, including a backend source copy for Tauri's generated schemas; the
+first build can take several minutes. Use the scheme's Release
+configuration for an optimized build. Install dependencies with `npm ci` first.
+
 For an optimized application:
 
 ```sh
