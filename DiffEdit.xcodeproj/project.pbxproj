@@ -1,89 +1,331 @@
 // !$*UTF8*$!
 {
 	archiveVersion = 1;
-	classes = {};
+	classes = {
+	};
 	objectVersion = 56;
 	objects = {
-		1014877D02DB8A540FD2AA8A = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "bootstrap.ts"; path = "bootstrap.ts"; sourceTree = "<group>"; };
-		0D4CA3C0219D63E2CF29F5E2 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "dialogs.ts"; path = "dialogs.ts"; sourceTree = "<group>"; };
-		9813A76656CFB11879337967 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "editor-style.ts"; path = "editor-style.ts"; sourceTree = "<group>"; };
-		A12B0E66474192F8CB9A2DB8 = { isa = PBXFileReference; lastKnownFileType = "text.html"; name = "index.html"; path = "index.html"; sourceTree = "<group>"; };
-		B68455D917BC26639B16E49A = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "main.ts"; path = "main.ts"; sourceTree = "<group>"; };
-		B1C176EED66433A50B2E7B58 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "model.test.ts"; path = "model.test.ts"; sourceTree = "<group>"; };
-		ADA05B81108EEDD78B6821CF = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "model.ts"; path = "model.ts"; sourceTree = "<group>"; };
-		C826BB06C2D980447FD34D87 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "past-viewport.ts"; path = "past-viewport.ts"; sourceTree = "<group>"; };
-		21E50AE16FC79C4FD739D148 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "preferences.ts"; path = "preferences.ts"; sourceTree = "<group>"; };
-		9442129030830A367442DBD9 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "preview.ts"; path = "preview.ts"; sourceTree = "<group>"; };
-		0EF2DE4DC72FE7780F2DF016 = { isa = PBXFileReference; lastKnownFileType = "text.css"; name = "style.css"; path = "style.css"; sourceTree = "<group>"; };
-		2C3929129B1CDDF17DBC8667 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "synchronization.test.ts"; path = "synchronization.test.ts"; sourceTree = "<group>"; };
-		713682B4C070E7F2783506CC = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "synchronization.ts"; path = "synchronization.ts"; sourceTree = "<group>"; };
-		C9545297169D5C6BC1F7440C = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "virtual-rows.ts"; path = "virtual-rows.ts"; sourceTree = "<group>"; };
-		9ECC8459EA5F39F9DA55CB4D = { isa = PBXGroup; children = (1014877D02DB8A540FD2AA8A,0D4CA3C0219D63E2CF29F5E2,9813A76656CFB11879337967,A12B0E66474192F8CB9A2DB8,B68455D917BC26639B16E49A,B1C176EED66433A50B2E7B58,ADA05B81108EEDD78B6821CF,C826BB06C2D980447FD34D87,21E50AE16FC79C4FD739D148,9442129030830A367442DBD9,0EF2DE4DC72FE7780F2DF016,2C3929129B1CDDF17DBC8667,713682B4C070E7F2783506CC,C9545297169D5C6BC1F7440C,); path = frontend; sourceTree = "<group>"; };
-		6C49D69A19D3FE0944F83627 = { isa = PBXFileReference; lastKnownFileType = "text"; name = "Cargo.lock"; path = "Cargo.lock"; sourceTree = "<group>"; };
-		856E77D389E16E75BDA13BA2 = { isa = PBXFileReference; lastKnownFileType = "text"; name = "Cargo.toml"; path = "Cargo.toml"; sourceTree = "<group>"; };
-		756C38CD60C867BC8D25BB28 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.rust"; name = "build.rs"; path = "build.rs"; sourceTree = "<group>"; };
-		12BC0EF171F32580F9DF9D3E = { isa = PBXFileReference; lastKnownFileType = "text.json"; name = "capabilities/default.json"; path = "capabilities/default.json"; sourceTree = "<group>"; };
-		442D3BDC00B10372A3E49F1B = { isa = PBXFileReference; lastKnownFileType = "image.icns"; name = "icons/icon.icns"; path = "icons/icon.icns"; sourceTree = "<group>"; };
-		5DB63FA7AB6962BB2A8CEC51 = { isa = PBXFileReference; lastKnownFileType = "image.png"; name = "icons/icon.png"; path = "icons/icon.png"; sourceTree = "<group>"; };
-		B16901CDFF681E05AB273231 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.rust"; name = "src/app_menu.rs"; path = "src/app_menu.rs"; sourceTree = "<group>"; };
-		1391CFE044C61D98EAA95073 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.rust"; name = "src/diff.rs"; path = "src/diff.rs"; sourceTree = "<group>"; };
-		E312EF3C10B3444F164F35C1 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.rust"; name = "src/document.rs"; path = "src/document.rs"; sourceTree = "<group>"; };
-		3D38E86279B958AD33A8EE3C = { isa = PBXFileReference; lastKnownFileType = "sourcecode.rust"; name = "src/main.rs"; path = "src/main.rs"; sourceTree = "<group>"; };
-		E246306B9FDC9496990E85ED = { isa = PBXFileReference; lastKnownFileType = "sourcecode.rust"; name = "src/regression_tests.rs"; path = "src/regression_tests.rs"; sourceTree = "<group>"; };
-		B1A5CAB3CF87FE02711A8E1B = { isa = PBXFileReference; lastKnownFileType = "sourcecode.rust"; name = "src/repository.rs"; path = "src/repository.rs"; sourceTree = "<group>"; };
-		05C55183CD460B2CE55C0E87 = { isa = PBXFileReference; lastKnownFileType = "text.json"; name = "tauri.conf.json"; path = "tauri.conf.json"; sourceTree = "<group>"; };
-		754A08DDF8BCB1CF22F310F0 = { isa = PBXGroup; children = (6C49D69A19D3FE0944F83627,856E77D389E16E75BDA13BA2,756C38CD60C867BC8D25BB28,12BC0EF171F32580F9DF9D3E,442D3BDC00B10372A3E49F1B,5DB63FA7AB6962BB2A8CEC51,B16901CDFF681E05AB273231,1391CFE044C61D98EAA95073,E312EF3C10B3444F164F35C1,3D38E86279B958AD33A8EE3C,E246306B9FDC9496990E85ED,B1A5CAB3CF87FE02711A8E1B,05C55183CD460B2CE55C0E87,); path = backend; sourceTree = "<group>"; };
-		AAF5506CE898288C4F6E9886 = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "editor-smoke.mjs"; path = "editor-smoke.mjs"; sourceTree = "<group>"; };
-		D0EE201DA223E1F1D92E471B = { isa = PBXFileReference; lastKnownFileType = "sourcecode.c.objc"; name = "webkit-layout.m"; path = "webkit-layout.m"; sourceTree = "<group>"; };
-		469E86E98B6A56FC61C4396B = { isa = PBXFileReference; lastKnownFileType = "sourcecode.javascript"; name = "webkit-layout.mjs"; path = "webkit-layout.mjs"; sourceTree = "<group>"; };
-		16728D18790DEB58B3B8C1DF = { isa = PBXGroup; children = (AAF5506CE898288C4F6E9886,D0EE201DA223E1F1D92E471B,469E86E98B6A56FC61C4396B,); path = scripts; sourceTree = "<group>"; };
-		8EC9A00BFD09B3190AC6B222 = { isa = PBXFileReference; lastKnownFileType = text; path = "README.md"; sourceTree = "<group>"; };
-		7030D0B2F71B999FF89A343D = { isa = PBXFileReference; lastKnownFileType = text; path = "package.json"; sourceTree = "<group>"; };
-		FA288D1472D29BECCB489A67 = { isa = PBXFileReference; lastKnownFileType = text; path = "package-lock.json"; sourceTree = "<group>"; };
-		38A007151ABE87CC01A5B6E9 = { isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DiffEdit.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		FBDC4F23F93125BBEEAE800C = { isa = PBXGroup; children = (38A007151ABE87CC01A5B6E9,); name = Products; sourceTree = "<group>"; };
-		DC76E9F0C0006E8F919E0C51 = { isa = PBXGroup; children = (9ECC8459EA5F39F9DA55CB4D,754A08DDF8BCB1CF22F310F0,16728D18790DEB58B3B8C1DF,8EC9A00BFD09B3190AC6B222,7030D0B2F71B999FF89A343D,FA288D1472D29BECCB489A67,FBDC4F23F93125BBEEAE800C,); sourceTree = "<group>"; };
-		80754AF91BFB6D1073585B04 = { isa = PBXShellScriptBuildPhase; alwaysOutOfDate = 1; buildActionMask = 2147483647; files = (); inputPaths = (); name = "Build Tauri app"; outputPaths = ("$(DERIVED_FILE_DIR)/DiffEdit-Info.plist", "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",); runOnlyForDeploymentPostprocessing = 0; shellPath = /bin/bash; shellScript = "set -euo pipefail\n\n# Xcode launched from Finder does not inherit an interactive shell's PATH.\nexport PATH=\"${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}\"\ncd \"${SRCROOT:?Run this script from the DiffEdit Xcode target.}\"\n\nfor tool in node npm cargo; do\n  if ! command -v \"$tool\" >/dev/null 2>&1; then\n    echo \"error: $tool is missing. Install the Node.js and Rust prerequisites from README.md.\"\n    exit 1\n  fi\ndone\nif [[ ! -x node_modules/.bin/tauri ]]; then\n  echo \"error: Dependencies are missing. Run npm ci in $SRCROOT, then build again.\"\n  exit 1\nfi\n\n# Keep generated Rust output in DerivedData, away from the source tree.\nexport CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR:-${PROJECT_TEMP_DIR}/cargo}\"\nworkspace=\"${PROJECT_TEMP_DIR}/tauri-workspace\"\nflags=(build --bundles app --no-sign --ci --config '{\"build\":{\"beforeBuildCommand\":null}}')\ncase \"${CONFIGURATION}\" in\n  Debug) profile=debug; flags+=(--debug) ;;\n  Release) profile=release ;;\n  *) echo \"error: Unsupported configuration: ${CONFIGURATION}\"; exit 1 ;;\nesac\n\n# The regular Tauri build embeds the frontend and produces the canonical bundle\n# metadata. Xcode owns the final product's signing and launch/debug lifecycle.\nnpm run build\n# Tauri regenerates ACL schemas beside Cargo.toml. Use a source copy so cloud\n# file-provider permissions cannot block generation inside the checkout.\nmkdir -p \"$workspace/backend\" \"$workspace/dist\"\n/usr/bin/rsync -a --delete --exclude='/target' --exclude='/gen' \\\n  \"$SRCROOT/backend/\" \"$workspace/backend/\"\n/usr/bin/rsync -a --delete \"$SRCROOT/dist/\" \"$workspace/dist/\"\ncd \"$workspace\"\nexport TAURI_APP_PATH=\"$workspace/backend\"\nexport TAURI_FRONTEND_PATH=\"$SRCROOT\"\n\"$SRCROOT/node_modules/.bin/tauri\" \"${flags[@]}\"\nbundle=\"${CARGO_TARGET_DIR}/${profile}/bundle/macos/DiffEdit.app\"\nif [[ ! -x \"$bundle/Contents/MacOS/diffedit\" ]]; then\n  echo \"error: Tauri did not produce the expected app at $bundle\"\n  exit 1\nfi\nmkdir -p \"${DERIVED_FILE_DIR}\" \"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}\"\ncp \"$bundle/Contents/Info.plist\" \"${DERIVED_FILE_DIR}/DiffEdit-Info.plist\"\n# ProcessInfoPlistFile consumes the generated plist; CodeSign creates the final\n# signature. Preserve all other Tauri resources, including future bundle assets.\n/usr/bin/rsync -a --delete --exclude='/Info.plist' --exclude='/_CodeSignature' \\\n  \"$bundle/Contents/\" \"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/\"\n"; };
-		89E1FD6268CC0F221A2BE178 = { isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; }; name = Debug; };
-		7082CC0B6FC1282FCEABD07A = { isa = XCBuildConfiguration; buildSettings = {
-        ARCHS = "$(NATIVE_ARCH_ACTUAL)";
-        CODE_SIGN_IDENTITY = "-";
-        CODE_SIGN_STYLE = Manual;
-        COMBINE_HIDPI_IMAGES = YES;
-        DEBUG_INFORMATION_FORMAT = dwarf;
-        ENABLE_APP_SANDBOX = NO;
-        ENABLE_HARDENED_RUNTIME = NO;
-        ENABLE_USER_SCRIPT_SANDBOXING = NO;
-        EXECUTABLE_NAME = diffedit;
-        GENERATE_INFOPLIST_FILE = NO;
-        INFOPLIST_FILE = "$(DERIVED_FILE_DIR)/DiffEdit-Info.plist";
-        ONLY_ACTIVE_ARCH = YES;
-        PRODUCT_BUNDLE_IDENTIFIER = local.diffedit;
-        PRODUCT_NAME = DiffEdit;
-        SUPPORTED_PLATFORMS = macosx;
-    }; name = Debug; };
-		E6DE6C99132752C914FEF632 = { isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; }; name = Release; };
-		639A7CA24D39909E713B47F7 = { isa = XCBuildConfiguration; buildSettings = {
-        ARCHS = "$(NATIVE_ARCH_ACTUAL)";
-        CODE_SIGN_IDENTITY = "-";
-        CODE_SIGN_STYLE = Manual;
-        COMBINE_HIDPI_IMAGES = YES;
-        DEBUG_INFORMATION_FORMAT = dwarf;
-        ENABLE_APP_SANDBOX = NO;
-        ENABLE_HARDENED_RUNTIME = NO;
-        ENABLE_USER_SCRIPT_SANDBOXING = NO;
-        EXECUTABLE_NAME = diffedit;
-        GENERATE_INFOPLIST_FILE = NO;
-        INFOPLIST_FILE = "$(DERIVED_FILE_DIR)/DiffEdit-Info.plist";
-        ONLY_ACTIVE_ARCH = YES;
-        PRODUCT_BUNDLE_IDENTIFIER = local.diffedit;
-        PRODUCT_NAME = DiffEdit;
-        SUPPORTED_PLATFORMS = macosx;
-    }; name = Release; };
-		862894B703A6DEDF96A9DD6C = { isa = XCConfigurationList; buildConfigurations = (89E1FD6268CC0F221A2BE178,E6DE6C99132752C914FEF632,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		C57128001CE614BF8549D6BB = { isa = XCConfigurationList; buildConfigurations = (7082CC0B6FC1282FCEABD07A,639A7CA24D39909E713B47F7,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		0E8A3AD980EC179856012B7E = { isa = PBXNativeTarget; buildConfigurationList = C57128001CE614BF8549D6BB; buildPhases = (80754AF91BFB6D1073585B04,); buildRules = (); dependencies = (); name = DiffEdit; productName = DiffEdit; productReference = 38A007151ABE87CC01A5B6E9; productType = "com.apple.product-type.application"; };
-		98F54143AB4E86B28C3AFEE0 = { isa = PBXProject; attributes = { BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 1600; }; buildConfigurationList = 862894B703A6DEDF96A9DD6C; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base,); mainGroup = DC76E9F0C0006E8F919E0C51; productRefGroup = FBDC4F23F93125BBEEAE800C; projectDirPath = ""; projectRoot = ""; targets = (0E8A3AD980EC179856012B7E,); };
+
+/* Begin PBXFileReference section */
+		05C55183CD460B2CE55C0E87 /* tauri.conf.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = tauri.conf.json; sourceTree = "<group>"; };
+		0D4CA3C0219D63E2CF29F5E2 /* dialogs.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = dialogs.ts; sourceTree = "<group>"; };
+		0EF2DE4DC72FE7780F2DF016 /* style.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = style.css; sourceTree = "<group>"; };
+		1014877D02DB8A540FD2AA8A /* bootstrap.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = bootstrap.ts; sourceTree = "<group>"; };
+		12BC0EF171F32580F9DF9D3E /* capabilities/default.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = capabilities/default.json; sourceTree = "<group>"; };
+		1391CFE044C61D98EAA95073 /* src/diff.rs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.rust; path = src/diff.rs; sourceTree = "<group>"; };
+		21E50AE16FC79C4FD739D148 /* preferences.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = preferences.ts; sourceTree = "<group>"; };
+		2C3929129B1CDDF17DBC8667 /* synchronization.test.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = synchronization.test.ts; sourceTree = "<group>"; };
+		38A007151ABE87CC01A5B6E9 /* DiffEdit.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DiffEdit.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		3D38E86279B958AD33A8EE3C /* src/main.rs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.rust; path = src/main.rs; sourceTree = "<group>"; };
+		442D3BDC00B10372A3E49F1B /* icons/icon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = icons/icon.icns; sourceTree = "<group>"; };
+		469E86E98B6A56FC61C4396B /* webkit-layout.mjs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "webkit-layout.mjs"; sourceTree = "<group>"; };
+		5DB63FA7AB6962BB2A8CEC51 /* icons/icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = icons/icon.png; sourceTree = "<group>"; };
+		6C49D69A19D3FE0944F83627 /* Cargo.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Cargo.lock; sourceTree = "<group>"; };
+		7030D0B2F71B999FF89A343D /* package.json */ = {isa = PBXFileReference; lastKnownFileType = text; path = package.json; sourceTree = "<group>"; };
+		713682B4C070E7F2783506CC /* synchronization.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = synchronization.ts; sourceTree = "<group>"; };
+		756C38CD60C867BC8D25BB28 /* build.rs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.rust; path = build.rs; sourceTree = "<group>"; };
+		856E77D389E16E75BDA13BA2 /* Cargo.toml */ = {isa = PBXFileReference; lastKnownFileType = text; path = Cargo.toml; sourceTree = "<group>"; };
+		8EC9A00BFD09B3190AC6B222 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = README.md; sourceTree = "<group>"; };
+		9442129030830A367442DBD9 /* preview.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = preview.ts; sourceTree = "<group>"; };
+		9813A76656CFB11879337967 /* editor-style.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "editor-style.ts"; sourceTree = "<group>"; };
+		A12B0E66474192F8CB9A2DB8 /* index.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = index.html; sourceTree = "<group>"; };
+		AAF5506CE898288C4F6E9886 /* editor-smoke.mjs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "editor-smoke.mjs"; sourceTree = "<group>"; };
+		ADA05B81108EEDD78B6821CF /* model.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = model.ts; sourceTree = "<group>"; };
+		B16901CDFF681E05AB273231 /* src/app_menu.rs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.rust; path = src/app_menu.rs; sourceTree = "<group>"; };
+		B1A5CAB3CF87FE02711A8E1B /* src/repository.rs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.rust; path = src/repository.rs; sourceTree = "<group>"; };
+		B1C176EED66433A50B2E7B58 /* model.test.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = model.test.ts; sourceTree = "<group>"; };
+		B68455D917BC26639B16E49A /* main.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = main.ts; sourceTree = "<group>"; };
+		C826BB06C2D980447FD34D87 /* past-viewport.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "past-viewport.ts"; sourceTree = "<group>"; };
+		C9545297169D5C6BC1F7440C /* virtual-rows.ts */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "virtual-rows.ts"; sourceTree = "<group>"; };
+		D0EE201DA223E1F1D92E471B /* webkit-layout.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "webkit-layout.m"; sourceTree = "<group>"; };
+		E246306B9FDC9496990E85ED /* src/regression_tests.rs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.rust; path = src/regression_tests.rs; sourceTree = "<group>"; };
+		E312EF3C10B3444F164F35C1 /* src/document.rs */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.rust; path = src/document.rs; sourceTree = "<group>"; };
+		FA288D1472D29BECCB489A67 /* package-lock.json */ = {isa = PBXFileReference; lastKnownFileType = text; path = "package-lock.json"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		16728D18790DEB58B3B8C1DF /* scripts */ = {
+			isa = PBXGroup;
+			children = (
+				AAF5506CE898288C4F6E9886 /* editor-smoke.mjs */,
+				D0EE201DA223E1F1D92E471B /* webkit-layout.m */,
+				469E86E98B6A56FC61C4396B /* webkit-layout.mjs */,
+			);
+			path = scripts;
+			sourceTree = "<group>";
+		};
+		754A08DDF8BCB1CF22F310F0 /* backend */ = {
+			isa = PBXGroup;
+			children = (
+				6C49D69A19D3FE0944F83627 /* Cargo.lock */,
+				856E77D389E16E75BDA13BA2 /* Cargo.toml */,
+				756C38CD60C867BC8D25BB28 /* build.rs */,
+				12BC0EF171F32580F9DF9D3E /* capabilities/default.json */,
+				442D3BDC00B10372A3E49F1B /* icons/icon.icns */,
+				5DB63FA7AB6962BB2A8CEC51 /* icons/icon.png */,
+				B16901CDFF681E05AB273231 /* src/app_menu.rs */,
+				1391CFE044C61D98EAA95073 /* src/diff.rs */,
+				E312EF3C10B3444F164F35C1 /* src/document.rs */,
+				3D38E86279B958AD33A8EE3C /* src/main.rs */,
+				E246306B9FDC9496990E85ED /* src/regression_tests.rs */,
+				B1A5CAB3CF87FE02711A8E1B /* src/repository.rs */,
+				05C55183CD460B2CE55C0E87 /* tauri.conf.json */,
+			);
+			path = backend;
+			sourceTree = "<group>";
+		};
+		9ECC8459EA5F39F9DA55CB4D /* frontend */ = {
+			isa = PBXGroup;
+			children = (
+				1014877D02DB8A540FD2AA8A /* bootstrap.ts */,
+				0D4CA3C0219D63E2CF29F5E2 /* dialogs.ts */,
+				9813A76656CFB11879337967 /* editor-style.ts */,
+				A12B0E66474192F8CB9A2DB8 /* index.html */,
+				B68455D917BC26639B16E49A /* main.ts */,
+				B1C176EED66433A50B2E7B58 /* model.test.ts */,
+				ADA05B81108EEDD78B6821CF /* model.ts */,
+				C826BB06C2D980447FD34D87 /* past-viewport.ts */,
+				21E50AE16FC79C4FD739D148 /* preferences.ts */,
+				9442129030830A367442DBD9 /* preview.ts */,
+				0EF2DE4DC72FE7780F2DF016 /* style.css */,
+				2C3929129B1CDDF17DBC8667 /* synchronization.test.ts */,
+				713682B4C070E7F2783506CC /* synchronization.ts */,
+				C9545297169D5C6BC1F7440C /* virtual-rows.ts */,
+			);
+			path = frontend;
+			sourceTree = "<group>";
+		};
+		DC76E9F0C0006E8F919E0C51 = {
+			isa = PBXGroup;
+			children = (
+				9ECC8459EA5F39F9DA55CB4D /* frontend */,
+				754A08DDF8BCB1CF22F310F0 /* backend */,
+				16728D18790DEB58B3B8C1DF /* scripts */,
+				8EC9A00BFD09B3190AC6B222 /* README.md */,
+				7030D0B2F71B999FF89A343D /* package.json */,
+				FA288D1472D29BECCB489A67 /* package-lock.json */,
+				FBDC4F23F93125BBEEAE800C /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		FBDC4F23F93125BBEEAE800C /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				38A007151ABE87CC01A5B6E9 /* DiffEdit.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		0E8A3AD980EC179856012B7E /* DiffEdit */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C57128001CE614BF8549D6BB /* Build configuration list for PBXNativeTarget "DiffEdit" */;
+			buildPhases = (
+				80754AF91BFB6D1073585B04 /* Build Tauri app */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DiffEdit;
+			productName = DiffEdit;
+			productReference = 38A007151ABE87CC01A5B6E9 /* DiffEdit.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		98F54143AB4E86B28C3AFEE0 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2720;
+			};
+			buildConfigurationList = 862894B703A6DEDF96A9DD6C /* Build configuration list for PBXProject "DiffEdit" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = DC76E9F0C0006E8F919E0C51;
+			productRefGroup = FBDC4F23F93125BBEEAE800C /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				0E8A3AD980EC179856012B7E /* DiffEdit */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		80754AF91BFB6D1073585B04 /* Build Tauri app */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Build Tauri app";
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/DiffEdit-Info.plist",
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "set -euo pipefail\n\n# Xcode launched from Finder does not inherit an interactive shell's PATH.\nexport PATH=\"${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}\"\ncd \"${SRCROOT:?Run this script from the DiffEdit Xcode target.}\"\n\nfor tool in node npm cargo; do\n  if ! command -v \"$tool\" >/dev/null 2>&1; then\n    echo \"error: $tool is missing. Install the Node.js and Rust prerequisites from README.md.\"\n    exit 1\n  fi\ndone\nif [[ ! -x node_modules/.bin/tauri ]]; then\n  echo \"error: Dependencies are missing. Run npm ci in $SRCROOT, then build again.\"\n  exit 1\nfi\n\n# Keep generated Rust output in DerivedData, away from the source tree.\nexport CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR:-${PROJECT_TEMP_DIR}/cargo}\"\nworkspace=\"${PROJECT_TEMP_DIR}/tauri-workspace\"\nflags=(build --bundles app --no-sign --ci --config '{\"build\":{\"beforeBuildCommand\":null}}')\ncase \"${CONFIGURATION}\" in\n  Debug) profile=debug; flags+=(--debug) ;;\n  Release) profile=release ;;\n  *) echo \"error: Unsupported configuration: ${CONFIGURATION}\"; exit 1 ;;\nesac\n\n# The regular Tauri build embeds the frontend and produces the canonical bundle\n# metadata. Xcode owns the final product's signing and launch/debug lifecycle.\nnpm run build\n# Tauri regenerates ACL schemas beside Cargo.toml. Use a source copy so cloud\n# file-provider permissions cannot block generation inside the checkout.\nmkdir -p \"$workspace/backend\" \"$workspace/dist\"\n/usr/bin/rsync -a --delete --exclude='/target' --exclude='/gen' \\\n  \"$SRCROOT/backend/\" \"$workspace/backend/\"\n/usr/bin/rsync -a --delete \"$SRCROOT/dist/\" \"$workspace/dist/\"\ncd \"$workspace\"\nexport TAURI_APP_PATH=\"$workspace/backend\"\nexport TAURI_FRONTEND_PATH=\"$SRCROOT\"\n\"$SRCROOT/node_modules/.bin/tauri\" \"${flags[@]}\"\nbundle=\"${CARGO_TARGET_DIR}/${profile}/bundle/macos/DiffEdit.app\"\nif [[ ! -x \"$bundle/Contents/MacOS/diffedit\" ]]; then\n  echo \"error: Tauri did not produce the expected app at $bundle\"\n  exit 1\nfi\nmkdir -p \"${DERIVED_FILE_DIR}\" \"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}\"\ncp \"$bundle/Contents/Info.plist\" \"${DERIVED_FILE_DIR}/DiffEdit-Info.plist\"\n# ProcessInfoPlistFile consumes the generated plist; CodeSign creates the final\n# signature. Preserve all other Tauri resources, including future bundle assets.\n/usr/bin/rsync -a --delete --exclude='/Info.plist' --exclude='/_CodeSignature' \\\n  \"$bundle/Contents/\" \"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		639A7CA24D39909E713B47F7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXECUTABLE_NAME = diffedit;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "$(DERIVED_FILE_DIR)/DiffEdit-Info.plist";
+				MACOSX_DEPLOYMENT_TARGET = "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)";
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = local.diffedit;
+				PRODUCT_NAME = DiffEdit;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = Release;
+		};
+		7082CC0B6FC1282FCEABD07A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXECUTABLE_NAME = diffedit;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "$(DERIVED_FILE_DIR)/DiffEdit-Info.plist";
+				MACOSX_DEPLOYMENT_TARGET = "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)";
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = local.diffedit;
+				PRODUCT_NAME = DiffEdit;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = Debug;
+		};
+		89E1FD6268CC0F221A2BE178 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+			};
+			name = Debug;
+		};
+		E6DE6C99132752C914FEF632 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		862894B703A6DEDF96A9DD6C /* Build configuration list for PBXProject "DiffEdit" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				89E1FD6268CC0F221A2BE178 /* Debug */,
+				E6DE6C99132752C914FEF632 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C57128001CE614BF8549D6BB /* Build configuration list for PBXNativeTarget "DiffEdit" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7082CC0B6FC1282FCEABD07A /* Debug */,
+				639A7CA24D39909E713B47F7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
 	};
-	rootObject = 98F54143AB4E86B28C3AFEE0;
+	rootObject = 98F54143AB4E86B28C3AFEE0 /* Project object */;
 }
