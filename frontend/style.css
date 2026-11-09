@@ -202,6 +202,9 @@ header .root {
 .cm-line {
   padding: 0 18px !important;
 }
+.cm-lineNumbers .cm-gutterElement {
+  padding-right: 6px !important;
+}
 .cm-gutters {
   background: transparent !important;
   color: #85858f !important;
@@ -622,10 +625,6 @@ body.resizing {
   padding-top: 0 !important;
 }
 
-#refresh {
-  margin: 0 12px 8px;
-  align-self: flex-start;
-}
 #review-source select {
   width: 100%;
 }

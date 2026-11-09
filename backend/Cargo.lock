@@ -579,10 +579,12 @@ dependencies = [
 name = "diffedit"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "imara-diff",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "objc2-web-kit",
  "serde",
  "serde_json",
  "tauri",

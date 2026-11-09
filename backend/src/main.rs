@@ -39,7 +39,68 @@ async fn work<T: Send + 'static>(
 }
 #[derive(Default)]
 struct FolderWindows(Mutex<HashMap<String, String>>);
-struct Startup(std::time::Instant);
+const STARTUP_WINDOW: &str = "startup";
+enum WarmWindow {
+    Unavailable,
+    Idle,
+    Assigned(String),
+}
+struct Startup {
+    started: std::time::Instant,
+    warm: Mutex<WarmWindow>,
+}
+
+fn build_folder_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    path: String,
+) -> tauri::Result<tauri::WebviewWindow> {
+    let window = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(path.into()))
+        .title("DiffEdit")
+        .visible(false)
+        .focused(false)
+        .background_color(tauri::window::Color(36, 36, 40, 255))
+        .inner_size(1200.0, 820.0)
+        .min_inner_size(650.0, 400.0)
+        .build()?;
+    #[cfg(target_os = "macos")]
+    window.with_webview(|platform| {
+        use objc2_app_kit::NSColor;
+        use objc2_web_kit::WKWebView;
+        let color = NSColor::colorWithSRGBRed_green_blue_alpha(
+            36.0 / 255.0,
+            36.0 / 255.0,
+            40.0 / 255.0,
+            1.0,
+        );
+        // Tauri supplies the live WKWebView on its main thread. Set its
+        // backing color as well as the native window's while WebKit paints.
+        unsafe {
+            let webview = &*platform.inner().cast::<WKWebView>();
+            webview.setUnderPageBackgroundColor(Some(&color));
+        }
+    })?;
+    Ok(window)
+}
+
+#[tauri::command]
+fn take_startup_folder(
+    window: tauri::Window,
+    startup: tauri::State<'_, Startup>,
+) -> Option<String> {
+    if window.label() != STARTUP_WINDOW {
+        return None;
+    }
+    let mut warm = startup.warm.lock().unwrap();
+    if matches!(*warm, WarmWindow::Assigned(_)) {
+        if let WarmWindow::Assigned(folder) = std::mem::replace(&mut *warm, WarmWindow::Unavailable)
+        {
+            return Some(folder);
+        }
+    }
+    None
+}
+
 #[tauri::command]
 fn show_ready(
     window: tauri::Window,
@@ -49,7 +110,7 @@ fn show_ready(
     eprintln!(
         "startup window={} native_ms={:.1} shell_ms={shell_ms:.1}",
         window.label(),
-        state.0.elapsed().as_secs_f64() * 1000.0
+        state.started.elapsed().as_secs_f64() * 1000.0
     );
     window.show().map_err(|e| e.to_string())?;
     window.set_focus().map_err(|e| e.to_string())
@@ -96,6 +157,22 @@ async fn route_folder_to_window(
         folders.insert(root.clone(), source);
         return Ok(Some(root));
     }
+    if let Some(window) = app.get_webview_window(STARTUP_WINDOW) {
+        let startup = app.state::<Startup>();
+        let mut warm = startup.warm.lock().unwrap();
+        if matches!(*warm, WarmWindow::Idle) {
+            folders.insert(root.clone(), STARTUP_WINDOW.into());
+            *warm = WarmWindow::Assigned(root);
+            drop(warm);
+            drop(folders);
+            // The selection is stored until the frontend takes it. The event
+            // only wakes an editor that has already installed its listener.
+            window
+                .emit("startup-folder", ())
+                .map_err(|e| e.to_string())?;
+            return Ok(None);
+        }
+    }
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let label = format!("folder-{}", NEXT.fetch_add(1, Ordering::Relaxed));
     folders.insert(root.clone(), label.clone());
@@ -103,45 +180,26 @@ async fn route_folder_to_window(
     let mut url = tauri::Url::parse("http://localhost/index.html").unwrap();
     url.query_pairs_mut().append_pair("folder", &root);
     let path = format!("index.html?{}", url.query().unwrap());
-    if let Err(e) =
-        tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(path.into()))
-            .title("DiffEdit")
-            .visible(false)
-            .background_color(tauri::window::Color(36, 36, 40, 255))
-            .inner_size(1200.0, 820.0)
-            .min_inner_size(650.0, 400.0)
-            .build()
-    {
+    if let Err(e) = build_folder_window(&app, &label, path) {
         registry.0.lock().unwrap().remove(&root);
         return Err(e.to_string());
     }
     Ok(None)
 }
-// A picker never needs a webview. Reserve a folder only after selection.
 fn pick_folder_window(app: &tauri::AppHandle) {
     static PICKING: AtomicBool = AtomicBool::new(false);
     if PICKING.swap(true, Ordering::SeqCst) {
         return;
     }
     let handle = app.clone();
-    app.dialog().file().pick_folder(move |folder| {
+    let done = move |folder: Option<String>| {
         PICKING.store(false, Ordering::SeqCst);
         let Some(folder) = folder else {
             return;
         };
+        let handle = handle.clone();
         tauri::async_runtime::spawn(async move {
-            let result = match folder.into_path() {
-                Ok(path) => route_folder_to_window(
-                    handle.clone(),
-                    None,
-                    path.to_string_lossy().into_owned(),
-                    false,
-                )
-                .await
-                .map(|_| ()),
-                Err(error) => Err(error.to_string()),
-            };
-            if let Err(error) = result {
+            if let Err(error) = route_folder_to_window(handle.clone(), None, folder, false).await {
                 handle
                     .dialog()
                     .message(error)
@@ -149,6 +207,35 @@ fn pick_folder_window(app: &tauri::AppHandle) {
                     .show(|_| {});
             }
         });
+    };
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+
+        // A standalone panel stays visible while the hidden editor initializes.
+        // The dialog plugin would attach a sheet to the hidden window.
+        let mtm = MainThreadMarker::new().expect("folder picker runs on the main thread");
+        let panel = NSOpenPanel::openPanel(mtm);
+        panel.setCanChooseDirectories(true);
+        panel.setCanChooseFiles(false);
+        panel.setAllowsMultipleSelection(false);
+        let selected = panel.clone();
+        panel.beginWithCompletionHandler(&block2::RcBlock::new(move |response| {
+            done(
+                (response == NSModalResponseOK)
+                    .then(|| selected.URL()?.path().map(|path| path.to_string()))
+                    .flatten(),
+            );
+        }));
+    }
+    #[cfg(not(target_os = "macos"))]
+    app.dialog().file().pick_folder(move |folder| {
+        done(
+            folder
+                .and_then(|f| f.into_path().ok())
+                .map(|p| p.to_string_lossy().into_owned()),
+        );
     });
 }
 #[tauri::command]
@@ -631,7 +718,10 @@ fn main() {
         }
         return;
     }
-    let startup = Startup(std::time::Instant::now());
+    let startup = Startup {
+        started: std::time::Instant::now(),
+        warm: Mutex::new(WarmWindow::Unavailable),
+    };
     tauri::Builder::default()
         .enable_macos_default_menu(false)
         .menu(app_menu::build)
@@ -690,6 +780,7 @@ fn main() {
             app_menu::menu_state,
             app_menu::remember_folder,
             show_ready,
+            take_startup_folder,
             document_path,
             resize_grid,
             route_folder,
@@ -715,6 +806,10 @@ fn main() {
         .expect("Failed to run DiffEdit")
         .run(|app, event| {
             if let tauri::RunEvent::Ready = event {
+                match build_folder_window(app, STARTUP_WINDOW, "index.html?warm=1".into()) {
+                    Ok(_) => *app.state::<Startup>().warm.lock().unwrap() = WarmWindow::Idle,
+                    Err(error) => eprintln!("Could not preload the editor: {error}"),
+                }
                 pick_folder_window(app);
             }
             #[cfg(target_os = "macos")]
@@ -754,6 +849,9 @@ fn main() {
                 drop(pending);
                 if finished {
                     app.exit(0);
+                }
+                if label == STARTUP_WINDOW {
+                    *app.state::<Startup>().warm.lock().unwrap() = WarmWindow::Unavailable;
                 }
                 app.state::<Service>().0.lock().unwrap().remove(&label);
                 app.state::<FolderWindows>()

@@ -58,6 +58,8 @@ import {
   Document,
   StageRow,
   visible,
+  visibleInNow,
+  changedLineTargets,
   changeAt,
   basePosition,
   wordRange,
@@ -188,6 +190,7 @@ let splitUndo = false,
   lastInputClass = "";
 let quitPending: number | null = null;
 let operationBusy = false;
+let refreshOnIdle = false;
 const editor = new EditorView({
   parent: $(".now"),
   state: makeState(""),
@@ -375,8 +378,6 @@ function updateCommitButtons() {
     !(
       repo.staged.length || [...buffers.values()].some((b) => b.selectionDirty)
     );
-  $<HTMLButtonElement>("#refresh").disabled =
-    operationBusy || refreshing || !repo;
 }
 function busy(s: string | null) {
   operationBusy = !!s;
@@ -388,6 +389,10 @@ function busy(s: string | null) {
   $("#busy-message").textContent = s || "";
   updateCommitButtons();
   scheduleMenuState();
+  if (!s && refreshOnIdle) {
+    refreshOnIdle = false;
+    void foreground().catch(fail);
+  }
 }
 const dialogs = new DialogQueue(presentDialog);
 function choose(message: string, choices: string[]) {
@@ -510,7 +515,7 @@ async function openFolder(root: string, routed = false) {
     $<HTMLButtonElement>("#commit-mode").disabled = !repo.gitRoot;
     $("#branch").textContent = `Branch: ${repo.branch}`;
     expanded.clear();
-    await invoke("remember_folder", { root: repo.root }).catch(console.error);
+    void invoke("remember_folder", { root: repo.root }).catch(console.error);
     renderTree();
     status(`${repo.files.length} files · ${repo.changed.length} changed`);
     updateTitle();
@@ -1444,20 +1449,19 @@ function renderQuick() {
   el.replaceChildren(list);
 }
 $(".quick-list").onscroll = () => renderQuick();
+function nowChanges(b: BufferState) {
+  return b.changes.filter((c) =>
+    visibleInNow(c, b.base, b.state.doc, whitespace),
+  );
+}
 async function navigate(direction: number, file = false) {
   repoMembership();
   if (!repo) return;
-  const paths = repo.files.filter(
-    (p) =>
-      changedPaths.has(p) || (buffers.has(p) && buffers.get(p)!.changes.length),
-  );
-  if (!file && active) {
+  const origin = active;
+  if (!file && origin) {
     const pos = editor.state.selection.main.head;
-    const text = editor.state.doc;
-    const candidates = active.changes.filter(
-      (c) =>
-        visible(c, active!.base, text, whitespace) &&
-        (direction > 0 ? c.b > pos : c.b < pos),
+    const candidates = nowChanges(origin).filter((c) =>
+      direction > 0 ? c.b > pos : c.b < pos,
     );
     const c = direction > 0 ? candidates[0] : candidates.at(-1);
     if (c) {
@@ -1465,48 +1469,58 @@ async function navigate(direction: number, file = false) {
       return;
     }
   }
-  if (!paths.length) return;
-  const i = active ? paths.indexOf(active.path) : -1;
-  const target =
-    paths[
-      i < 0
-        ? direction > 0
-          ? 0
-          : paths.length - 1
-        : (i + direction + paths.length) % paths.length
-    ];
-  await activate(target);
-  if (!active || active.path !== target) return;
-  const current = editor.state.doc;
-  const changes = active.changes.filter((c) =>
-    visible(c, active!.base, current, whitespace),
+  const paths = repo.files.filter(
+    (p) =>
+      changedPaths.has(p) || (buffers.has(p) && buffers.get(p)!.changes.length),
   );
-  const c = direction > 0 ? changes[0] : changes.at(-1);
-  if (c) jump(c.b);
+  const i = origin ? paths.indexOf(origin.path) : -1;
+  const start = i < 0 ? (direction > 0 ? -1 : paths.length) : i;
+  const generation = opening;
+  for (let step = 1; step <= paths.length; step++) {
+    const target =
+      paths[(start + direction * step + paths.length) % paths.length];
+    if (!file) {
+      // Check the destination before switching editors. A file may have only
+      // deletions, hidden whitespace, or a change that cannot be opened as text.
+      let b: BufferState;
+      try {
+        b = await loadBuffer(target);
+      } catch (error) {
+        console.warn(`Skipping ${target} during change navigation:`, error);
+        continue;
+      }
+      if (opening !== generation || operationBusy || mode() !== "edit") return;
+      if (!nowChanges(b).length) continue;
+    }
+    await activate(target);
+    if (active?.path !== target) return;
+    const changes = nowChanges(active);
+    const c = direction > 0 ? changes[0] : changes.at(-1);
+    if (c) jump(c.b);
+    return;
+  }
+  if (!refreshing) trimBuffers();
 }
 async function navigateLocal(direction: number, byLine: boolean) {
-  if (!active) return;
-  await flush(active);
-  const lines = new Set<number>();
-  const currentText = editor.state.doc;
-  for (const c of active.changes) {
-    if (!visible(c, active.base, currentText, whitespace)) continue;
-    const start = editor.state.doc.lineAt(c.b).number,
-      end = editor.state.doc.lineAt(Math.max(c.b, c.bEnd - 1)).number;
-    for (let n = start; n <= end; n++) lines.add(n);
-  }
-  let targets = [...lines].sort((a, b) => a - b);
-  if (!byLine)
-    targets = targets.filter((n, i, all) => i === 0 || all[i - 1] !== n - 1);
+  const b = active;
+  if (!b) return;
+  await flush(b);
+  if (active !== b || operationBusy || mode() !== "edit") return;
+  const doc = editor.state.doc;
+  const targets = changedLineTargets(
+    b.changes,
+    b.base,
+    doc,
+    whitespace,
+    byLine,
+  );
   if (!targets.length) return;
-  const current = editor.state.doc.lineAt(
-    editor.state.selection.main.head,
-  ).number;
+  const current = doc.lineAt(editor.state.selection.main.head).number;
   const target =
     direction > 0
-      ? (targets.find((n) => n > current) ?? targets[0])
-      : ([...targets].reverse().find((n) => n < current) ?? targets.at(-1)!);
-  jump(editor.state.doc.line(target).from);
+      ? (targets.find(({ line }) => line > current) ?? targets[0])
+      : (targets.reverse().find(({ line }) => line < current) ?? targets[0]);
+  jump(target.pos);
 }
 function paragraph(direction: number) {
   const s = editor.state.doc.toString(),
@@ -2057,7 +2071,6 @@ $("#quick-query").onkeydown = (e) => {
   }
 };
 $("#summary").addEventListener("input", updateCommitButtons);
-$("#refresh").onclick = () => void foreground().catch(fail);
 $("#stage-selected").onclick = () => void stage().catch(fail);
 $("#commit").onclick = () => void commit().catch(fail);
 $(".divider").onpointerdown = (e) => {
@@ -2177,7 +2190,8 @@ void Promise.all([quitCancelledListener, quitRequestListener])
 void win.onFocusChanged(({ payload }) => {
   if (payload) {
     void syncMenuState(true).catch(fail);
-    void foreground().catch(fail);
+    if (operationBusy) refreshOnIdle = true;
+    else void foreground().catch(fail);
   }
 });
 void win.onCloseRequested(async (e) => {
@@ -2224,7 +2238,7 @@ function menuAvailability(): Record<string, boolean> {
   const localChanges =
     editing &&
     active!.changes.some((c) =>
-      visible(c, active!.base, editor.state.doc, whitespace),
+      visibleInNow(c, active!.base, editor.state.doc, whitespace),
     );
   const otherFiles =
     !!repo &&
@@ -2390,11 +2404,33 @@ window.addEventListener("resize", () => {
   document.documentElement.style.setProperty("--sidebar", `${sidebarWidth}px`);
 });
 
-const initialFolder = new URLSearchParams(window.location.search).get("folder");
-if (initialFolder) void openFolder(initialFolder, true).catch(fail);
-
-if (new URLSearchParams(window.location.search).get("command") === "open")
-  void pickFolder().catch(fail);
+export async function startWindow() {
+  const query = new URLSearchParams(window.location.search);
+  let folder = query.get("folder");
+  if (query.has("warm")) {
+    // Register first, then read the queued selection. Either the initial read
+    // or a later event can deliver it, even if the picker finished before JS.
+    let resolve!: (folder: string) => void;
+    let reject!: (error: unknown) => void;
+    const selection = new Promise<string>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    const take = () => {
+      void invoke<string | null>("take_startup_folder").then((path) => {
+        if (path !== null) resolve(path);
+      }, reject);
+    };
+    const unlisten = await listen("startup-folder", take);
+    try {
+      take();
+      folder = await selection;
+    } finally {
+      unlisten();
+    }
+  }
+  if (folder) await openFolder(folder, true);
+}
 
 // Read actual editor geometry so search rows, the divider, font size and status
 // bar are included in the resize grid's offset. Width remains freely resizable.

@@ -4,6 +4,7 @@ import { build } from "esbuild";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import { emit } from "@tauri-apps/api/event";
 import { Transaction } from "@codemirror/state";
 const dom = new Window({ url: "http://tauri.localhost" });
 for (const name of [
@@ -38,6 +39,8 @@ let commitCalls = 0,
   commitSelection;
 let holdCommit;
 let inspectionGate = null;
+let startupFolder = null;
+let startupReads = 0;
 let stageRowCount = 2;
 let divergedStage = false;
 let failNextRefresh = false,
@@ -160,6 +163,12 @@ mockIPC(
         },
         diff: diff().diff,
       };
+    }
+    if (cmd === "take_startup_folder") {
+      startupReads++;
+      const path = startupFolder;
+      startupFolder = null;
+      return path;
     }
     if (cmd === "route_folder") return args.root;
     if (cmd === "quick_matches")
@@ -317,7 +326,20 @@ try {
   assert.equal(app.menuAvailability().save, false);
   assert.equal(app.menuAvailability().quick, false);
   assert.equal(app.menuAvailability().open, true);
-  await app.openFolder("/fixture");
+  // The preloaded editor can initialize while the picker has no selection.
+  window.history.replaceState(null, "", "/?warm=1");
+  const opening = app.startWindow();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(startupReads, 1);
+  assert.equal(app.menuAvailability().quick, false);
+  startupFolder = "/fixture";
+  await emit("startup-folder");
+  await opening;
+  assert.equal(startupReads, 2);
+  assert.ok(
+    document.querySelector(".tree").textContent.includes("fixture.tex"),
+  );
+  window.history.replaceState(null, "", "/");
   assert.equal(document.querySelector("#welcome-open"), null);
   assert.equal(document.querySelector("#edit-mode").disabled, false);
   assert.equal(app.menuAvailability().quick, true);
@@ -376,6 +398,7 @@ try {
   const originalChanges = buffer.changes;
   buffer.changes = [
     { a: 1, aEnd: 2, b: 1, bEnd: 2 },
+    { a: 3, aEnd: 4, b: 3, bEnd: 3 },
     { a: 5, aEnd: 6, b: 5, bEnd: 6 },
     { a: 22, aEnd: 23, b: 22, bEnd: 23 },
   ];
@@ -393,12 +416,10 @@ try {
   }
   app.editor.dispatch({ selection: { anchor: 1 } });
   await bracket("BracketRight");
-  assert.equal(
-    app.editor.state.selection.main.head,
-    app.editor.state.doc.line(2).from,
-  );
+  assert.equal(app.editor.state.selection.main.head, 22);
   await bracket("BracketLeft");
-  assert.equal(app.editor.state.selection.main.head, 0);
+  assert.equal(app.editor.state.selection.main.head, 1);
+  app.editor.dispatch({ selection: { anchor: 0 } });
   await bracket("BracketRight", true);
   assert.equal(app.editor.state.selection.main.head, 1);
   await bracket("BracketRight", true);

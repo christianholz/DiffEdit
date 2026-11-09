@@ -63,6 +63,39 @@ export function visible(
     if (/\S/u.test(chunk)) return true;
   return false;
 }
+// A deletion marker has no changed text to land on in the current editor.
+export function visibleInNow(
+  c: Change,
+  base: string,
+  current: Text,
+  whitespace: boolean,
+) {
+  return c.bEnd > c.b && visible(c, base, current, whitespace);
+}
+
+export function changedLineTargets(
+  changes: Change[],
+  base: string,
+  doc: Text,
+  whitespace: boolean,
+  byLine: boolean,
+) {
+  const targets: { line: number; pos: number }[] = [];
+  let last = 0;
+  for (const c of changes) {
+    if (!visibleInNow(c, base, doc, whitespace)) continue;
+    const start = doc.lineAt(c.b).number;
+    const end = doc.lineAt(c.bEnd - 1).number;
+    for (let line = Math.max(last + 1, start); line <= end; line++) {
+      if (byLine || line > last + 1 || last === 0) {
+        targets.push({ line, pos: line === start ? c.b : doc.line(line).from });
+      }
+      last = line;
+    }
+  }
+  return targets;
+}
+
 export function changeAt(changes: Change[], pos: number): Change | undefined {
   return (
     changes.find((c) => c.b === pos && c.bEnd > pos) ||

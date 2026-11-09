@@ -43,8 +43,9 @@ Index updates use a locked temporary copy. Validation and ordinary hook failures
 leave the original index intact. A completed commit is reported separately from
 index installation or refresh failures; an installation failure preserves the
 candidate index and reports its recovery path. Ambiguous Git outcomes also retain
-the candidate for inspection. Refresh (Command-R) retries repository and document
-inspection, continuing through individual file failures. HEAD, index, or baseline
+the candidate for inspection. DiffEdit refreshes when its window regains focus.
+File → Refresh (Command-R) also retries repository and document inspection.
+Both continue through individual file failures. HEAD, index, or baseline
 changes invalidate pending selections.
 
 Git baselines and staged text use Git's checkout filters, including CRLF attributes;

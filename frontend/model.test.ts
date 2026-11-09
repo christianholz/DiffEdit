@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { basePosition, changeAt, wordRange, visible } from "./model";
+import {
+  basePosition,
+  changeAt,
+  changedLineTargets,
+  wordRange,
+  visible,
+} from "./model";
 test("one alignment drives equal text, replacement edges and pure insertions", () => {
   const changes = [
     { a: 3, aEnd: 7, b: 3, bEnd: 9 },
@@ -62,4 +68,33 @@ test("immediate ranges survive typing, reverting, whitespace edges and multiple 
     const tr = EditorState.create({ doc: c.now }).update({ changes: c.edits });
     assert.deepEqual(previewChanges(c.prior, c.base, tr), c.expected);
   }
+});
+
+test("line and group jumps land at the first current-side change", () => {
+  const doc = EditorState.create({
+    doc: "some unchanged words then new text\nsecond change\npast deletion only\nunchanged prefix replacement",
+  }).doc;
+  const first = doc.line(1).from + "some unchanged words then ".length;
+  const second = doc.line(2).from + "second ".length;
+  const deletion = doc.line(3).from;
+  const last = doc.line(4).from + "unchanged prefix ".length;
+  const changes = [
+    { a: 0, aEnd: 3, b: first, bEnd: first + 3 },
+    { a: 3, aEnd: 4, b: first + 4, bEnd: first + 8 },
+    { a: 4, aEnd: 4, b: second, bEnd: second + 6 },
+    { a: 4, aEnd: 8, b: deletion, bEnd: deletion },
+    { a: 8, aEnd: 9, b: last, bEnd: doc.length },
+  ];
+  assert.deepEqual(changedLineTargets(changes, "old text!", doc, false, true), [
+    { line: 1, pos: first },
+    { line: 2, pos: second },
+    { line: 4, pos: last },
+  ]);
+  assert.deepEqual(
+    changedLineTargets(changes, "old text!", doc, false, false),
+    [
+      { line: 1, pos: first },
+      { line: 4, pos: last },
+    ],
+  );
 });
