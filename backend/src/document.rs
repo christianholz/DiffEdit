@@ -59,15 +59,26 @@ impl DiffInput {
         }
     }
 }
+#[derive(Clone, Copy, Default, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewSource {
+    #[default]
+    Buffer,
+    Index,
+}
 #[derive(Deserialize)]
 pub struct Selection {
+    #[serde(default)]
+    pub source: ReviewSource,
     pub path: String,
     pub version: u64,
     pub head: Option<String>,
     pub selected: HashSet<String>,
 }
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StageSnapshot {
+    pub source: ReviewSource,
     pub version: u64,
     pub head: Option<String>,
     pub index: String,
@@ -138,40 +149,53 @@ impl Document {
         self.disk.is_some() || !self.text.is_empty()
     }
     pub fn rows(&self) -> Vec<diff::StageRow> {
-        let mut rows = diff::stage_rows(&self.base, &self.text);
-        if self.base.is_empty() && self.text.is_empty() && self.base_exists != self.exists() {
-            let adding = self.exists();
-            rows.push(diff::StageRow {
-                id: Some(if adding { "file:add" } else { "file:delete" }.into()),
-                kind: if adding { "insert" } else { "delete" }.into(),
-                text: String::new(),
-                old_line: None,
-                new_line: None,
-            });
-        }
-        rows
+        review_rows(&self.base, self.base_exists, &self.text, self.exists())
     }
     pub fn selected_text(&self, selection: &Selection) -> Result<Option<String>, String> {
+        self.check_selection(selection)?;
+        materialize(
+            &self.base,
+            self.base_exists,
+            &self.text,
+            self.exists(),
+            &selection.selected,
+        )
+    }
+    fn check_selection(&self, selection: &Selection) -> Result<(), String> {
         if selection.version != self.version || selection.head != self.head {
             return Err("Document changed; review the selection again".into());
         }
-        let rows = self.rows();
-        let available: HashSet<_> = rows.iter().filter_map(|r| r.id.clone()).collect();
-        if !selection.selected.is_subset(&available) {
-            return Err("Changes updated; review the selection again".into());
-        }
-        let text = diff::staged_text(&rows, &selection.selected);
-        let all = !available.is_empty() && selection.selected == available;
-        let exists = if all {
-            self.exists()
-        } else if selection.selected.is_empty() {
-            self.base_exists
-        } else {
-            !text.is_empty() || self.base_exists
-        };
-        Ok(exists.then_some(text))
+        Ok(())
     }
+    pub fn selected_entry(
+        &self,
+        repo: &repository::Repo,
+        selection: &Selection,
+    ) -> Result<Option<String>, String> {
+        self.check_selection(selection)?;
+        match selection.source {
+            ReviewSource::Buffer => self.selected_text(selection),
+            ReviewSource::Index => {
+                let staged = repository::index_text(repo, &self.path)?;
+                materialize(
+                    &self.base,
+                    self.base_exists,
+                    staged.as_deref().unwrap_or_default(),
+                    staged.is_some(),
+                    &selection.selected,
+                )
+            }
+        }
+    }
+    #[cfg(test)]
     pub fn stage_snapshot(&self, repo: &repository::Repo) -> Result<StageSnapshot, String> {
+        self.review(repo, None)
+    }
+    pub fn review(
+        &self,
+        repo: &repository::Repo,
+        requested: Option<ReviewSource>,
+    ) -> Result<StageSnapshot, String> {
         let g = repo.git_root.as_ref().ok_or("Not a Git repository")?;
         let index = repository::index_signature(g)?;
         repository::verify(repo, &index)?;
@@ -180,35 +204,43 @@ impl Document {
         }
         repository::validate_file_mode(repo, &self.path)?;
         let staged = repository::index_text(repo, &self.path)?;
-        let rows = self.rows();
-        let staged_rows = diff::stage_rows(&self.base, staged.as_deref().unwrap_or_default());
+        let staged_rows = review_rows(
+            &self.base,
+            self.base_exists,
+            staged.as_deref().unwrap_or_default(),
+            staged.is_some(),
+        );
         let staged_ids: HashSet<_> = staged_rows.iter().filter_map(|r| r.id.clone()).collect();
-        // Match exact row identities only; unmatched staged content is never
-        // silently replaced by a different buffer version.
-        let mut selected: HashSet<_> = rows
+        let buffer_rows = self.rows();
+        let matching: HashSet<_> = buffer_rows
             .iter()
             .filter_map(|r| r.id.as_ref())
             .filter(|id| staged_ids.contains(*id))
             .cloned()
             .collect();
-        for row in &rows {
-            if let Some(id) = &row.id {
-                if (id == "file:add" && staged.is_some())
-                    || (id == "file:delete" && staged.is_none())
-                {
-                    selected.insert(id.clone());
-                }
-            }
-        }
-        let selection = Selection {
-            path: self.path.clone(),
-            version: self.version,
-            head: self.head.clone(),
-            selected: selected.clone(),
+        let represented = materialize(
+            &self.base,
+            self.base_exists,
+            &self.text,
+            self.exists(),
+            &matching,
+        )? == staged;
+        let source = requested.unwrap_or(if represented {
+            ReviewSource::Buffer
+        } else {
+            ReviewSource::Index
+        });
+        let (rows, selected) = match source {
+            ReviewSource::Buffer => (
+                buffer_rows,
+                if represented {
+                    matching
+                } else {
+                    HashSet::new()
+                },
+            ),
+            ReviewSource::Index => (staged_rows, staged_ids),
         };
-        if self.selected_text(&selection)? != staged {
-            return Err("Staged content differs from this buffer; reconcile it with Git before replacing the staging selection".into());
-        }
         if repository::index_signature(g)? != index {
             return Err("Git staging changed during review; try again".into());
         }
@@ -218,8 +250,44 @@ impl Document {
             index,
             rows,
             selected,
+            source,
         })
     }
+}
+fn review_rows(base: &str, base_exists: bool, text: &str, exists: bool) -> Vec<diff::StageRow> {
+    let mut rows = diff::stage_rows(base, text);
+    if base.is_empty() && text.is_empty() && base_exists != exists {
+        rows.push(diff::StageRow {
+            id: Some(if exists { "file:add" } else { "file:delete" }.into()),
+            kind: if exists { "insert" } else { "delete" }.into(),
+            text: String::new(),
+            old_line: None,
+            new_line: None,
+        });
+    }
+    rows
+}
+fn materialize(
+    base: &str,
+    base_exists: bool,
+    text: &str,
+    exists: bool,
+    selected: &HashSet<String>,
+) -> Result<Option<String>, String> {
+    let rows = review_rows(base, base_exists, text, exists);
+    let available: HashSet<_> = rows.iter().filter_map(|r| r.id.clone()).collect();
+    if !selected.is_subset(&available) {
+        return Err("Changes updated; review the selection again".into());
+    }
+    let result = diff::staged_text(&rows, selected);
+    let exists = if !available.is_empty() && selected == &available {
+        exists
+    } else if selected.is_empty() {
+        base_exists
+    } else {
+        !result.is_empty() || base_exists
+    };
+    Ok(exists.then_some(result))
 }
 
 #[cfg(test)]
@@ -295,6 +363,7 @@ mod tests {
         d.text = String::new();
         d.disk = None;
         let choose = |d: &Document, ids: &[&str]| Selection {
+            source: ReviewSource::Buffer,
             path: d.path.clone(),
             version: d.version,
             head: d.head.clone(),

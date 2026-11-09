@@ -283,10 +283,6 @@ header .root {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.status .timing {
-  color: #909099;
-  font-size: 11px;
-}
 .stage {
   line-height: 1.55;
   flex: 1;
@@ -624,4 +620,12 @@ body.resizing {
 }
 .now .cm-content {
   padding-top: 0 !important;
+}
+
+#refresh {
+  margin: 0 12px 8px;
+  align-self: flex-start;
+}
+#review-source select {
+  width: 100%;
 }

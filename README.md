@@ -32,13 +32,29 @@ File and Git operations run on background workers. Document edits have one write
 per buffer; an interrupted acknowledgement recovers from a complete snapshot.
 Diff results and staging selections identify both the buffer version and HEAD.
 
-In Committing mode, checkboxes start from the existing Git index. Stage selected
-lines updates the active file's index entry. Commit staged changes applies the
-checked selections across all changed files, including unsaved buffers. Index
-updates use a locked temporary copy, so a failed validation or commit hook leaves
-the original index intact. Changes to HEAD or the index require renewed review.
-Symbolic links, merge conflicts, and permission changes are rejected by text
-staging; handle those with Git before reviewing text changes.
+In Committing mode, checkboxes start from the existing Git index. The version
+selector lets you review buffer changes or the staged version when they differ.
+Stage selected lines updates the active file's index entry. Commit selected
+changes applies pending checkbox selections and existing staged files, including
+selected unsaved edits. Unrelated unchecked working files are not opened or
+included. Editing after making a pending selection resets it and requires review.
+
+Index updates use a locked temporary copy. Validation and ordinary hook failures
+leave the original index intact. A completed commit is reported separately from
+index installation or refresh failures; an installation failure preserves the
+candidate index and reports its recovery path. Ambiguous Git outcomes also retain
+the candidate for inspection. Refresh (Command-R) retries repository and document
+inspection, continuing through individual file failures. HEAD, index, or baseline
+changes invalidate pending selections.
+
+Git baselines and staged text use Git's checkout filters, including CRLF attributes;
+staging applies Git's clean filters. Ordinary folders compare against disk and
+include dotfiles. Symbolic links, merge conflicts, binary files, and permission
+changes are rejected by text staging; handle those with Git before reviewing text.
+
+The reusable clean document cache is limited by count and size. Unsaved buffers,
+pending selections, and documents with undo history are retained. Preferences
+synchronize across windows, tolerate unavailable storage, and fit the viewport.
 
 ## Build and run
 
@@ -66,3 +82,21 @@ For an optimized application:
 npm run build:app
 open 'backend/target/release/bundle/macos/DiffEdit.app'
 ```
+
+## Development checks
+
+```sh
+npm run build
+npm test
+npm run test:editor
+npm run test:native
+npm run test:layout
+cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path backend/Cargo.toml -- --check
+```
+
+The editor workflow checks exercise UI state with mocked Tauri IPC. Native tests
+use real temporary Git repositories for staging, commits, filters, and recovery.
+The macOS WebKit check verifies renderer layout under the application CSP. These
+checks do not yet launch the packaged Tauri app through a complete automated user
+workflow.

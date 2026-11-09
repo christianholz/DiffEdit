@@ -32,12 +32,19 @@ for (const withNonce of [false, true]) {
       extensions: [lineNumbers(), EditorView.lineWrapping, ${withNonce ? "editorStyleNonce(), wholeRowScroll," : ""}]});
     const past = ${withNonce} ? new EditorView({parent: document.querySelector('.past'), doc: 'Past row with descenders pg.\\n'.repeat(100), extensions: [lineNumbers(), EditorView.lineWrapping, editorStyleNonce(), pastViewport]}) : null;
     setTimeout(() => {
+      // Native WebKit can defer animation-frame measurements in this isolated
+      // host. Flush public editor geometry before issuing scroll targets.
+      view.coordsAtPos(0);
+      if (past) past.coordsAtPos(0);
       if (past) past.dispatch({effects: EditorView.scrollIntoView(EditorSelection.range(past.state.doc.line(30).from, past.state.doc.line(40).to))});
       const scroller = view.scrollDOM;
       const content = view.contentDOM.getBoundingClientRect();
       const gutter = document.querySelector('.cm-gutters').getBoundingClientRect();
       scroller.scrollTop = 607;
-      setTimeout(() => { const result = {
+      setTimeout(() => {
+        view.coordsAtPos(0);
+        if (past) past.coordsAtPos(0);
+        const result = {
         display: getComputedStyle(scroller).display, contentX: content.x, contentY: content.y,
         gutterRight: gutter.right, scrollTop: scroller.scrollTop, width: scroller.clientWidth, lineHeight: view.defaultLineHeight,
         past: past ? { unused: past.dom.parentElement.clientHeight - 5 - past.dom.getBoundingClientRect().height, height: past.scrollDOM.clientHeight, line: past.defaultLineHeight, top: past.scrollDOM.scrollTop, contentTop: past.contentDOM.getBoundingClientRect().top, row40: past.coordsAtPos(past.state.doc.line(40).from), block40: past.lineBlockAt(past.state.doc.line(40).from).top, cssLine: getComputedStyle(past.contentDOM).lineHeight } : null,

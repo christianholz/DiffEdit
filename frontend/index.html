@@ -18,7 +18,10 @@
     <div id="app">
       <div class="workspace">
         <aside class="sidebar">
-          <span class="root">FOLDERS</span>
+          <span class="root">FOLDERS</span
+          ><button id="refresh" type="button" title="Refresh (⌘R / Ctrl+R)">
+            Refresh
+          </button>
           <div class="tree"></div>
           <span id="branch" hidden></span>
           <div class="commit-box" hidden>
@@ -27,7 +30,8 @@
               placeholder="Description (optional)"
             ></textarea
             ><button id="stage-selected">Stage selected lines</button
-            ><button id="commit">Commit staged changes</button>
+            ><span id="review-source"></span
+            ><button id="commit">Commit selected changes</button>
           </div>
           <div class="mode-switch" role="group" aria-label="Workspace mode">
             <button id="edit-mode" disabled aria-pressed="true">Editing</button
@@ -39,7 +43,7 @@
         <div class="sidebar-divider"></div>
         <main class="main">
           <div class="placeholder">
-            <span>Select a file to compare with HEAD.</span>
+            <span>Select a file to edit.</span>
           </div>
           <div class="editor-stack" hidden>
             <div class="past"></div>
@@ -70,8 +74,7 @@
         </main>
       </div>
       <footer class="status">
-        <span class="message">Open a folder to begin.</span
-        ><span class="timing"></span>
+        <span class="message">Open a folder to begin.</span>
       </footer>
       <dialog class="quick">
         <input id="quick-query" placeholder="Find a file…" />

@@ -88,6 +88,9 @@ interface BufferState extends Omit<Document, "text"> {
   locked: boolean;
   scroll: number;
   selection: Set<string> | null;
+  selectionDirty: boolean;
+  selectionInvalid: boolean;
+  source: "buffer" | "index" | null;
   rows: StageRow[];
   rowIds: string[];
   micros: number;
@@ -200,6 +203,9 @@ const editor = new EditorView({
     for (const tr of trs) {
       if (tr.docChanged) {
         b.revision++;
+        if (b.selectionDirty) b.selectionInvalid = true;
+        b.selection = null;
+        b.source = null;
         b.changes = previewChanges(b.changes, b.base, tr);
         b.state = editor.state;
         b.sync.enqueue(tr.changes);
@@ -228,12 +234,16 @@ const past = new EditorView({
     doc: "",
     extensions: [
       pastViewport,
+      keymap.of(defaultKeymap),
       editorStyleNonce(),
       EditorState.lineSeparator.of("\n"),
       lineNumbers(),
       decorations,
       EditorView.updateListener.of((u) => {
-        if (u.selectionSet && u.view.hasFocus) reflectPastSelection();
+        if (u.selectionSet && u.view.hasFocus) {
+          reflectPastSelection();
+          void updateRestoreEnabled().catch(fail);
+        }
       }),
       EditorView.domEventHandlers({
         contextmenu(e, v) {
@@ -243,9 +253,12 @@ const past = new EditorView({
             pos === null
               ? undefined
               : active.changes.find((c) => c.a <= pos && pos < c.aEnd);
-          if (!c) return false;
+          const selected = selectedChanges();
+          if (!c && !selected.length) return false;
           e.preventDefault();
-          void pastRestoreMenu(c);
+          void (selected.length
+            ? restoreMenu(selected, true)
+            : pastRestoreMenu(c!));
           return true;
         },
       }),
@@ -352,6 +365,19 @@ function fail(e: unknown) {
   status(String(e));
   void choose(String(e), ["OK"]);
 }
+function updateCommitButtons() {
+  $<HTMLButtonElement>("#stage-selected").disabled =
+    operationBusy || !active || !repo?.gitRoot;
+  $<HTMLButtonElement>("#commit").disabled =
+    operationBusy ||
+    !repo?.gitRoot ||
+    !$<HTMLInputElement>("#summary").value.trim() ||
+    !(
+      repo.staged.length || [...buffers.values()].some((b) => b.selectionDirty)
+    );
+  $<HTMLButtonElement>("#refresh").disabled =
+    operationBusy || refreshing || !repo;
+}
 function busy(s: string | null) {
   operationBusy = !!s;
   $(".sidebar").inert = !!s;
@@ -360,6 +386,7 @@ function busy(s: string | null) {
   $(".search").inert = !!s;
   $(".overlay").hidden = !s;
   $("#busy-message").textContent = s || "";
+  updateCommitButtons();
   scheduleMenuState();
 }
 const dialogs = new DialogQueue(presentDialog);
@@ -388,11 +415,24 @@ function presentDialog(message: string, choices: string[]): Promise<string> {
     d.showModal();
   });
 }
+let storedPreferences = { wrap, whitespace, font, pastHeight };
 function persist() {
-  localStorage.setItem(
-    "preferences",
-    JSON.stringify({ wrap, whitespace, font, pastHeight }),
+  pastHeight = Math.max(
+    45,
+    Math.min(pastHeight, Math.max(45, $(".main").clientHeight - 100)),
   );
+  const current = { wrap, whitespace, font, pastHeight };
+  try {
+    const merged = readPreferences(localStorage);
+    for (const key of Object.keys(current) as (keyof typeof current)[]) {
+      if (current[key] !== storedPreferences[key])
+        Object.assign(merged, { [key]: current[key] });
+    }
+    localStorage.setItem("preferences", JSON.stringify(merged));
+  } catch {
+    /* Storage may be unavailable. */
+  }
+  storedPreferences = current;
   document.documentElement.style.setProperty("--font", `${font}px`);
   $(".past").style.height = "";
   document.documentElement.style.setProperty("--past", `${pastHeight}px`);
@@ -420,7 +460,7 @@ function updateStatus() {
   const p = editor.state.selection.main.head,
     l = editor.state.doc.lineAt(p);
   status(
-    `Ln ${l.number}, Col ${p - l.from + 1}  ·  ${active.changes.length} changes${dirty(active) ? "  ·  Unsaved" : ""}`,
+    `Ln ${l.number}, Col ${p - l.from + 1}  ·  ${active.changes.filter((c) => visible(c, active!.base, editor.state.doc, whitespace)).length} changes${dirty(active) ? "  ·  Unsaved" : ""}`,
   );
 }
 const fileElements = new Map<string, HTMLElement>();
@@ -449,6 +489,7 @@ async function openFolder(root: string, routed = false) {
     }
     if (refreshFlight) await refreshFlight;
     if (buffers.size && !(await canClose())) return;
+    await Promise.all([...releases.values()]);
     for (const b of buffers.values()) await flush(b);
     ++opening;
     const opened = await invoke<Repo>("open_folder", { root });
@@ -510,6 +551,7 @@ function repoMembership() {
   }
 }
 function renderTree() {
+  updateCommitButtons();
   repoMembership();
   const tree = $(".tree");
   fileElements.clear();
@@ -591,15 +633,21 @@ function renderTree() {
         b?.selection === null || !b
           ? stagedPaths.has(path)
           : ids.length > 0 && count === ids.length;
-      check.indeterminate = count > 0 && count < ids.length;
+      check.indeterminate =
+        (!b?.selectionDirty && !!repo?.partialStaged?.includes(path)) ||
+        (count > 0 && count < ids.length);
       check.onclick = (e) => {
         e.stopPropagation();
         const all = check.checked;
         void (async () => {
           await activate(path);
-          await renderStage();
           if (!active || active.path !== path) return;
+          active.source = "buffer";
+          active.selection = null;
+          await loadStage(active);
           active.selection = new Set(all ? active.rowIds : []);
+          active.selectionDirty = true;
+          active.selectionInvalid = false;
           await renderStage();
           renderTree();
         })().catch(fail);
@@ -630,6 +678,9 @@ async function activate(path: string) {
   past.contentDOM.blur();
   if (active && active !== b) active.rows = [];
   active = b;
+  buffers.delete(path);
+  buffers.set(path, b);
+  if (!refreshing) trimBuffers();
   splitUndo = true;
   lastInputClass = "";
   editor.setState(b.state);
@@ -651,8 +702,48 @@ async function activate(path: string) {
   updateStatus();
   editor.focus();
 }
+const releases = new Map<string, Promise<void>>();
+function trimBuffers() {
+  // Histories and user work are never silently discarded. Bound the reusable
+  // clean cache by both document count and approximate UTF-16 storage size.
+  let size = [...buffers.values()].reduce(
+    (n, b) => n + b.base.length + b.state.doc.length + b.diskDoc.length,
+    0,
+  );
+  for (const [path, b] of buffers) {
+    if (buffers.size <= 32 && size <= 16 * 1024 * 1024) break;
+    if (
+      b === active ||
+      b.locked ||
+      dirty(b) ||
+      b.selectionDirty ||
+      b.selectionInvalid ||
+      undoDepth(b.state) ||
+      redoDepth(b.state)
+    )
+      continue;
+    buffers.delete(path);
+    size -= b.base.length + b.state.doc.length + b.diskDoc.length;
+    const release = (async () => {
+      try {
+        await flush(b);
+        await invoke("release_document", { path, version: b.version });
+      } catch (error) {
+        // Retain the frontend identity if releasing failed, including history.
+        if (!buffers.has(path)) buffers.set(path, b);
+        status(`Could not release ${path}: ${error}`);
+      } finally {
+        releases.delete(path);
+      }
+    })();
+    releases.set(path, release);
+  }
+}
 async function loadBuffer(path: string): Promise<BufferState> {
   return buffers.load(path, async () => {
+    await releases.get(path);
+    const retained = buffers.get(path);
+    if (retained) return retained;
     const d = await invoke<Document>("open_document", { path });
     const { text, ...snapshot } = d;
     const b: BufferState = {
@@ -661,6 +752,9 @@ async function loadBuffer(path: string): Promise<BufferState> {
       changes: [],
       scroll: 0,
       selection: null,
+      selectionDirty: false,
+      selectionInvalid: false,
+      source: null,
       rows: [],
       rowIds: [],
       micros: 0,
@@ -971,15 +1065,17 @@ function jump(pos: number) {
 }
 function selectedChanges(): Change[] {
   if (!active) return [];
-  return active.changes.filter((c) =>
-    editor.state.selection.ranges.some(
+  const reverse = past.hasFocus;
+  return active.changes.filter((change) => {
+    const c = reverse ? { b: change.a, bEnd: change.aEnd } : change;
+    return (reverse ? past : editor).state.selection.ranges.some(
       (r) =>
         !r.empty &&
         (c.b === c.bEnd
           ? c.b >= r.from && c.b < r.to
           : c.b < r.to && c.bEnd > r.from),
-    ),
-  );
+    );
+  });
 }
 function restoreChanges(changes: Change[]) {
   if (!active || !changes.length) return;
@@ -1003,7 +1099,13 @@ function restore(c?: Change) {
     restoreChanges(selected);
     return;
   }
-  c ??= changeAt(active.changes, editor.state.selection.main.head);
+  c ??= past.hasFocus
+    ? active.changes.find(
+        (c) =>
+          c.a <= past.state.selection.main.head &&
+          past.state.selection.main.head <= c.aEnd,
+      )
+    : changeAt(active.changes, editor.state.selection.main.head);
   if (c) restoreChanges([c]);
 }
 async function restoreMenu(changes: Change[], selection = false) {
@@ -1069,13 +1171,12 @@ async function save(b = active) {
       updateStatus();
     }
     if (repo) {
-      const changed = new Set(repo.changed);
-      if (
-        b.state.doc.toString() !== b.base ||
-        b.baseExists !== (b.disk !== null)
-      )
-        changed.add(b.path);
-      repo = { ...repo, changed: [...changed].sort() };
+      try {
+        repo = await invoke<Repo>("refresh");
+        if (!repo.gitRoot) await inspectBuffer(b);
+      } catch (error) {
+        status(`Saved ${b.path}. Status refresh failed: ${error}`);
+      }
     }
     renderTree();
   } catch (e) {
@@ -1115,6 +1216,9 @@ async function resolve(b: BufferState, reload: boolean) {
     b.head = d.head;
     b.version = d.version;
     if (reload) {
+      if (b.selectionDirty) b.selectionInvalid = true;
+      b.selection = null;
+      b.source = null;
       const head = b.state.selection.main.head;
       const scroll = active === b ? editor.scrollDOM.scrollTop : b.scroll;
       b.state = makeState(d.text);
@@ -1157,54 +1261,79 @@ function foreground(force = false): Promise<void> {
   });
   return refreshFlight;
 }
+async function inspectBuffer(b: BufferState) {
+  // Inspection does not block typing. Retry obsolete snapshots and install
+  // the baseline and its derived ranges in one synchronous step.
+  while (true) {
+    await flush(b);
+    const revision = b.revision;
+    const d = await invoke<
+      Omit<Document, "path" | "text"> & {
+        diff: DiffUpdate["diff"] | null;
+      }
+    >("inspect_document", { path: b.path, head: b.head });
+    if (revision !== b.revision || d.version !== b.version) continue;
+    if (
+      b.base !== d.base ||
+      b.baseExists !== d.baseExists ||
+      b.head !== d.head
+    ) {
+      if (b.selectionDirty) b.selectionInvalid = true;
+      b.selection = null;
+      b.source = null;
+    }
+    b.base = d.base;
+    b.baseExists = d.baseExists;
+    b.head = d.head;
+    if (d.diff) {
+      b.changes = d.diff.changes;
+      b.micros = d.diff.micros;
+      b.diffEpoch++;
+    }
+    if (active === b && d.diff) applyDiff(b);
+    if (d.disk !== b.disk) {
+      if (dirty(b)) {
+        const c = await choose(
+          `${b.path} was changed or deleted outside DiffEdit.`,
+          ["Cancel", "Keep Buffer", "Reload"],
+        );
+        if (c !== "Cancel") await resolve(b, c === "Reload");
+      } else await resolve(b, true);
+    }
+    break;
+  }
+}
 async function performForeground() {
   if (!repo || refreshing || closing) return;
   refreshing = true;
+  updateCommitButtons();
+  scheduleMenuState();
   try {
     const previousIndex = repo.index;
     repo = await invoke<Repo>("refresh");
     if (repo.index !== previousIndex) {
       for (const b of buffers.values()) {
+        if (b.selectionDirty) b.selectionInvalid = true;
         b.selection = null;
+        b.source = null;
         b.index = "";
       }
     }
     $("#branch").textContent = `Branch: ${repo.branch}`;
+    const errors: string[] = [];
     for (const b of buffers.values()) {
-      // Inspection does not block typing. Retry obsolete snapshots and install
-      // the baseline and its derived ranges in one synchronous step.
-      while (true) {
-        await flush(b);
-        const revision = b.revision;
-        const d = await invoke<
-          Omit<Document, "path" | "text"> & { diff: DiffUpdate["diff"] | null }
-        >("inspect_document", { path: b.path, head: b.head });
-        if (revision !== b.revision || d.version !== b.version) continue;
-        b.base = d.base;
-        b.baseExists = d.baseExists;
-        b.head = d.head;
-        if (d.diff) {
-          b.changes = d.diff.changes;
-          b.micros = d.diff.micros;
-          b.diffEpoch++;
-        }
-        if (active === b && d.diff) applyDiff(b);
-        if (d.disk !== b.disk) {
-          if (dirty(b)) {
-            const c = await choose(
-              `${b.path} was changed or deleted outside DiffEdit.`,
-              ["Cancel", "Keep Buffer", "Reload"],
-            );
-            if (c !== "Cancel") await resolve(b, c === "Reload");
-          } else await resolve(b, true);
-        }
-        break;
+      try {
+        await inspectBuffer(b);
+      } catch (error) {
+        errors.push(`${b.path}: ${error}`);
       }
     }
     renderTree();
+    if (errors.length) throw Error(errors.join("\n"));
     if (mode() === "stage" && active) await renderStage();
   } finally {
     refreshing = false;
+    updateCommitButtons();
   }
 }
 function showSearch(replace = false) {
@@ -1430,7 +1559,10 @@ async function loadStage(b: BufferState) {
   await flush(b);
   const revision = b.revision,
     head = b.head;
-  const snapshot = await invoke<StageSnapshot>("stage_rows", { path: b.path });
+  const snapshot = await invoke<StageSnapshot>("stage_rows", {
+    path: b.path,
+    source: b.source,
+  });
   if (
     b.revision !== revision ||
     b.head !== head ||
@@ -1439,16 +1571,16 @@ async function loadStage(b: BufferState) {
   )
     throw Error("Document changed during staging review; try again");
   const available = new Set(snapshot.rows.flatMap((r) => (r.id ? [r.id] : [])));
-  if (b.index && b.index !== snapshot.index && b.selection !== null) {
+  if (b.index && b.index !== snapshot.index && b.selectionDirty) {
+    b.selectionInvalid = true;
     b.selection = null;
-    b.index = "";
-    throw Error("Git staging changed; review the selection again");
   }
-  if (b.selection === null) {
+  if (b.selection === null) b.selection = new Set(snapshot.selected);
+  else if ([...b.selection].some((id) => !available.has(id))) {
+    b.selectionInvalid = true;
     b.selection = new Set(snapshot.selected);
-  } else {
-    b.selection = new Set([...b.selection].filter((id) => available.has(id)));
   }
+  b.source = snapshot.source ?? "buffer";
   b.rows = snapshot.rows;
   b.rowIds = [...available];
   b.index = snapshot.index;
@@ -1456,6 +1588,7 @@ async function loadStage(b: BufferState) {
 function selectionFor(b: BufferState) {
   return {
     path: b.path,
+    source: b.source ?? "buffer",
     version: b.version,
     head: b.head,
     selected: [...(b.selection ?? [])],
@@ -1477,7 +1610,33 @@ async function renderStage() {
     mode() !== "stage"
   )
     return;
+  if (b.selectionInvalid) {
+    status(
+      "Pending selection was reset because its contents changed. Review and select the lines again.",
+    );
+    b.selectionInvalid = false;
+    b.selectionDirty = false;
+  }
   const rows = b.rows;
+  const source = document.createElement("select");
+  source.setAttribute("aria-label", "Review version");
+  for (const [value, label] of [
+    ["buffer", "Buffer changes"],
+    ["index", "Staged version"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    source.append(option);
+  }
+  source.value = b.source ?? "buffer";
+  source.onchange = () => {
+    b.source = source.value as "buffer" | "index";
+    b.selection = null;
+    b.selectionDirty = false;
+    void renderStage().catch(fail);
+  };
+  $("#review-source").replaceChildren(source);
   const el = $(".stage");
   el.replaceChildren();
   let paint: boolean | null = null;
@@ -1504,7 +1663,7 @@ async function renderStage() {
   virtualRows(
     el,
     displayed.length,
-    font * 1.55 + 6,
+    Math.max(23, font * 1.55 + 6),
     (index) => {
       const i = displayed[index];
       if (i === null) {
@@ -1532,6 +1691,7 @@ async function renderStage() {
       row.append(check, numbers, code);
       const set = (v: boolean, render = true) => {
         if (!r.id) return;
+        b.selectionDirty = true;
         v ? b.selection!.add(r.id) : b.selection!.delete(r.id);
         check.checked = v;
         row.classList.toggle("off", !v);
@@ -1561,6 +1721,7 @@ async function renderStage() {
           ) {
             const id = rows[j].id;
             if (id) {
+              b.selectionDirty = true;
               paint ? b.selection!.add(id) : b.selection!.delete(id);
             }
             setters.get(j)?.(paint, false);
@@ -1594,6 +1755,7 @@ async function renderStage() {
                     above ? i + 1 : rows.length,
                   ))
                     if (entry.id) {
+                      b.selectionDirty = true;
                       above
                         ? b.selection!.add(entry.id)
                         : b.selection!.delete(entry.id);
@@ -1609,22 +1771,40 @@ async function renderStage() {
       };
       return row;
     },
-    () => setters.clear(),
+    (index) => {
+      const i = displayed[index];
+      if (i !== null) setters.delete(i);
+    },
   );
 }
 async function stage() {
   if (operationBusy || !active) return;
   busy("Staging…");
   try {
+    if (refreshFlight) await refreshFlight;
     const b = active;
+    if (b.selectionInvalid)
+      throw Error("Buffer changed; review the selection again before staging");
     await loadStage(b);
+    if (b.selectionInvalid)
+      throw Error("Git staging changed; review the selection again");
     await invoke("stage_selected", {
       selection: selectionFor(b),
       index: b.index,
     });
-    repo = await invoke<Repo>("refresh");
-    for (const buffer of buffers.values())
-      if (buffer.index) buffer.index = repo.index;
+    b.selectionDirty = false;
+    b.selection = null;
+    b.source = null;
+    try {
+      repo = await invoke<Repo>("refresh");
+      for (const buffer of buffers.values())
+        if (buffer.index) buffer.index = repo.index;
+      if (mode() === "stage" && active === b) await renderStage();
+    } catch (error) {
+      renderTree();
+      status(`Staged ${b.path}. Refresh failed: ${error}`);
+      return;
+    }
     renderTree();
     status(`Staged selected lines in ${b.path}`);
   } finally {
@@ -1640,32 +1820,64 @@ async function commit() {
       $<HTMLInputElement>("#summary").value +
       "\n\n" +
       $<HTMLTextAreaElement>("#body").value;
-    if (!message.trim()) throw Error("Enter a commit summary");
+    if (!$<HTMLInputElement>("#summary").value.trim())
+      throw Error("Enter a commit summary");
     const paths = new Set([
-      ...repo.changed,
-      ...[...buffers.values()].filter(dirty).map((b) => b.path),
+      ...repo.staged,
+      ...[...buffers.values()]
+        .filter((b) => b.selectionDirty || b.selectionInvalid)
+        .map((b) => b.path),
     ]);
     const reviewed: BufferState[] = [];
     let index: string | null = null;
     for (const path of paths) {
       const b = await loadBuffer(path);
+      if (b.selectionInvalid)
+        throw Error(
+          `${path}: buffer changed; review the selection again before committing`,
+        );
+      if (!b.selectionDirty) {
+        b.selection = null;
+        b.source = null;
+      }
       await loadStage(b);
+      if (b.selectionInvalid)
+        throw Error(`${path}: staging changed; review the selection again`);
       if (index !== null && index !== b.index)
         throw Error("Git staging changed during review; try again");
       index = b.index;
       reviewed.push(b);
     }
-    const output = await invoke<string>("commit_changes", {
+    const outcome = await invoke<{
+      output: string;
+      committed: boolean;
+      oid: string | null;
+      warning: string | null;
+    }>("commit_changes", {
       message,
       selections: reviewed.map(selectionFor),
       index: index ?? repo.index,
     });
+    if (!outcome.committed)
+      throw Error(outcome.warning ?? "Git did not confirm the commit");
     $<HTMLInputElement>("#summary").value = "";
     $<HTMLTextAreaElement>("#body").value = "";
-    for (const b of buffers.values()) b.selection = null;
-    await foreground(true);
-    if (mode() === "stage") await renderStage();
-    status(output);
+    for (const b of buffers.values()) {
+      b.selection = null;
+      b.selectionDirty = false;
+      b.selectionInvalid = false;
+      b.source = null;
+    }
+    try {
+      await foreground(true);
+    } catch (error) {
+      const notification = `Committed ${outcome.oid ?? ""}. ${outcome.warning ? outcome.warning + " " : ""}Refresh failed: ${error}`;
+      status(notification);
+      if (outcome.warning) await choose(notification, ["OK"]);
+      return;
+    }
+    status(outcome.warning ?? outcome.output);
+    if (outcome.warning) await choose(outcome.warning, ["OK"]);
   } finally {
     busy(null);
   }
@@ -1684,6 +1896,9 @@ async function action(id: string) {
   switch (id) {
     case "open":
       await pickFolder();
+      break;
+    case "refresh":
+      await foreground();
       break;
     case "save":
       await save();
@@ -1841,6 +2056,8 @@ $("#quick-query").onkeydown = (e) => {
     }
   }
 };
+$("#summary").addEventListener("input", updateCommitButtons);
+$("#refresh").onclick = () => void foreground().catch(fail);
 $("#stage-selected").onclick = () => void stage().catch(fail);
 $("#commit").onclick = () => void commit().catch(fail);
 $(".divider").onpointerdown = (e) => {
@@ -1850,13 +2067,13 @@ $(".divider").onpointerdown = (e) => {
   $(".divider").setPointerCapture(e.pointerId);
   $(".divider").onpointermove = (e) => {
     pastHeight = Math.max(
-      35,
+      45,
       Math.min($(".main").clientHeight - 100, height + e.clientY - start),
     );
     $(".past").style.height = "";
     document.documentElement.style.setProperty("--past", `${pastHeight}px`);
   };
-  $(".divider").onpointerup = () => {
+  $(".divider").onpointercancel = $(".divider").onpointerup = () => {
     document.body.classList.remove("resizing");
     $(".divider").onpointermove = null;
     persist();
@@ -1873,6 +2090,11 @@ document.addEventListener(
       return;
     }
     if (!(e.metaKey || e.ctrlKey) || e.isComposing) return;
+    if (e.key.toLowerCase() === "r") {
+      e.preventDefault();
+      void foreground().catch(fail);
+      return;
+    }
     let command: string | undefined;
     const key = e.key.toLowerCase();
     if (e.code === "BracketRight" || key === "]")
@@ -2017,6 +2239,7 @@ function menuAvailability(): Record<string, boolean> {
     close: ready,
     save: ready && !!active && dirty(active),
     "save-all": ready && [...buffers.values()].some(dirty),
+    refresh: ready && !!repo && !refreshing,
     undo:
       ready &&
       (field
@@ -2034,8 +2257,14 @@ function menuAvailability(): Record<string, boolean> {
     restore:
       editing &&
       !field &&
-      !past.hasFocus &&
-      (!!c || selectedChanges().length > 0),
+      (!!c ||
+        selectedChanges().length > 0 ||
+        (past.hasFocus &&
+          active!.changes.some(
+            (c) =>
+              c.a <= past.state.selection.main.head &&
+              past.state.selection.main.head <= c.aEnd,
+          ))),
     wrap: editing,
     whitespace: editing,
     larger: editing && font < 32,
@@ -2087,7 +2316,10 @@ void listen<string>("menu-action", ({ payload }) => {
 });
 void syncMenuState().catch(fail);
 
-let sidebarWidth = prefs.sidebarWidth;
+let sidebarWidth = Math.max(
+  150,
+  Math.min(prefs.sidebarWidth, window.innerWidth - 150),
+);
 document.documentElement.style.setProperty("--sidebar", `${sidebarWidth}px`);
 $(".sidebar-divider").onpointerdown = (e) => {
   const x = e.clientX,
@@ -2095,17 +2327,68 @@ $(".sidebar-divider").onpointerdown = (e) => {
   const divider = $(".sidebar-divider");
   divider.setPointerCapture(e.pointerId);
   divider.onpointermove = (e) => {
-    sidebarWidth = Math.max(150, Math.min(550, width + e.clientX - x));
+    sidebarWidth = Math.max(
+      150,
+      Math.min(550, window.innerWidth - 150, width + e.clientX - x),
+    );
     document.documentElement.style.setProperty(
       "--sidebar",
       `${sidebarWidth}px`,
     );
   };
-  divider.onpointerup = () => {
+  divider.onpointercancel = divider.onpointerup = () => {
     divider.onpointermove = null;
-    localStorage.setItem("sidebarWidth", String(sidebarWidth));
+    try {
+      localStorage.setItem("sidebarWidth", String(sidebarWidth));
+    } catch {
+      /* Storage may be unavailable. */
+    }
   };
 };
+
+window.addEventListener("storage", (event) => {
+  if (
+    event.key !== "preferences" &&
+    event.key !== "sidebarWidth" &&
+    event.key !== null
+  )
+    return;
+  const next = readPreferences(localStorage);
+  wrap = next.wrap;
+  whitespace = next.whitespace;
+  font = next.font;
+  pastHeight = Math.max(
+    45,
+    Math.min(next.pastHeight, Math.max(45, $(".main").clientHeight - 100)),
+  );
+  sidebarWidth = Math.max(
+    150,
+    Math.min(next.sidebarWidth, window.innerWidth - 150),
+  );
+  storedPreferences = { wrap, whitespace, font, pastHeight };
+  document.documentElement.style.setProperty("--font", `${font}px`);
+  document.documentElement.style.setProperty("--past", `${pastHeight}px`);
+  document.documentElement.style.setProperty("--sidebar", `${sidebarWidth}px`);
+  editor.dispatch({
+    effects: wrapConfig.reconfigure(wrap ? EditorView.lineWrapping : []),
+  });
+  past.dispatch({
+    effects: pastWrapConfig.reconfigure(wrap ? EditorView.lineWrapping : []),
+  });
+  lastPastKey = "";
+  if (active) applyDiff(active);
+  if (mode() === "stage") void renderStage().catch(fail);
+  void syncMenuState().catch(fail);
+});
+window.addEventListener("resize", () => {
+  pastHeight = Math.max(
+    45,
+    Math.min(pastHeight, Math.max(45, $(".main").clientHeight - 100)),
+  );
+  sidebarWidth = Math.max(150, Math.min(sidebarWidth, window.innerWidth - 150));
+  document.documentElement.style.setProperty("--past", `${pastHeight}px`);
+  document.documentElement.style.setProperty("--sidebar", `${sidebarWidth}px`);
+});
 
 const initialFolder = new URLSearchParams(window.location.search).get("folder");
 if (initialFolder) void openFolder(initialFolder, true).catch(fail);

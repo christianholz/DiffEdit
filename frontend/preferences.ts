@@ -16,6 +16,12 @@ export function readPreferences(storage: Pick<Storage, "getItem">) {
   } catch {
     /* Ignore invalid persisted preferences. */
   }
+  let sidebar: string | null = null;
+  try {
+    sidebar = storage.getItem("sidebarWidth");
+  } catch {
+    /* Storage may be unavailable. */
+  }
   const font = bounded(value.font, 13, 9, 32);
   return {
     wrap: typeof value.wrap === "boolean" ? value.wrap : true,
@@ -24,9 +30,7 @@ export function readPreferences(storage: Pick<Storage, "getItem">) {
     font,
     pastHeight: bounded(value.pastHeight, 5 * font * 1.55 + 16, 45, 1000),
     sidebarWidth: bounded(
-      storage.getItem("sidebarWidth") === null
-        ? undefined
-        : Number(storage.getItem("sidebarWidth")),
+      sidebar === null ? undefined : Number(sidebar),
       240,
       150,
       550,

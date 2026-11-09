@@ -39,6 +39,11 @@ let commitCalls = 0,
 let holdCommit;
 let inspectionGate = null;
 let stageRowCount = 2;
+let divergedStage = false;
+let failNextRefresh = false,
+  failInspections = false;
+const inspectedPaths = [];
+const releasedPaths = [];
 let text = "Original paragraph.\nSecond line.\n",
   base = text,
   version = 0,
@@ -114,9 +119,16 @@ mockIPC(
       await new Promise((resolve) => {
         holdCommit = resolve;
       });
-      return "Committed";
+      return {
+        output: "Committed",
+        committed: true,
+        oid: "new-head",
+        warning: null,
+      };
     }
     if (cmd === "inspect_document") {
+      inspectedPaths.push(args.path);
+      if (failInspections) throw Error(`Cannot inspect ${args.path}`);
       const snapshot = {
         base,
         disk,
@@ -152,6 +164,10 @@ mockIPC(
     if (cmd === "route_folder") return args.root;
     if (cmd === "quick_matches")
       return Array.from({ length: 300 }, (_, i) => `file-${i}.tex`);
+    if (cmd === "refresh" && failNextRefresh) {
+      failNextRefresh = false;
+      throw Error("Refresh unavailable");
+    }
     if (cmd === "open_folder" || cmd === "refresh")
       return {
         root: "/fixture",
@@ -227,8 +243,14 @@ mockIPC(
     )
       return null;
     if (cmd === "document_path" || cmd === "resize_grid") return null;
+    if (cmd === "stage_selected") return null;
+    if (cmd === "release_document") {
+      releasedPaths.push(args.path);
+      return null;
+    }
     if (cmd === "stage_rows")
       return {
+        source: args.source ?? (divergedStage ? "index" : "buffer"),
         version,
         head: "h",
         index: "index",
@@ -268,7 +290,7 @@ const source =
     'import "./style.css";',
     "",
   ) +
-  "\nexport {active,foreground,resolve,closeWindow,editor,past,activate,openFolder,action,flush,buffers,save,selectedChanges,restoreChanges,mappedSelection,renderStage,commit,busy,decorations,filterQuick,quickMatches,menuAvailability};";
+  "\nexport {active,foreground,resolve,closeWindow,editor,past,activate,openFolder,action,flush,buffers,save,selectedChanges,restoreChanges,mappedSelection,renderStage,commit,stage,busy,decorations,filterQuick,quickMatches,menuAvailability};";
 await mkdir("node_modules/.cache", { recursive: true });
 const built = await build({
   stdin: {
@@ -447,6 +469,20 @@ try {
   assert.equal(document.querySelector("#replace-row").hidden, false);
   await app.flush(app.buffers.get("fixture.tex"));
   document.querySelector("#summary").value = "Selected changes";
+  const callsBefore = commitCalls;
+  await assert.rejects(app.commit(), /buffer changed; review/);
+  assert.equal(commitCalls, callsBefore);
+  document.querySelector("#commit-mode").click();
+  await app.renderStage();
+  // Re-review after edits, then explicitly select a single replacement row.
+  const reviewChecks = document.querySelectorAll(".stage input:not(:disabled)");
+  reviewChecks[0].checked = false;
+  reviewChecks[0].dispatchEvent(new Event("change"));
+  await app.stage();
+  const afterStaging = document.querySelector(".stage input:not(:disabled)");
+  assert.ok(afterStaging, "staging keeps the review interactive");
+  afterStaging.checked = false;
+  afterStaging.dispatchEvent(new Event("change"));
   const committing = app.commit();
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.ok(Object.values(app.menuAvailability()).every((v) => !v));
@@ -461,6 +497,24 @@ try {
   );
   holdCommit();
   await committing;
+  document.querySelector("#summary").value = "Commit before refresh failure";
+  divergedStage = true;
+  failNextRefresh = true;
+  const committedBeforeRefreshFailure = app.commit();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    commitSelection.find((s) => s.path === "fixture.tex").source,
+    "index",
+  );
+  holdCommit();
+  await committedBeforeRefreshFailure;
+  divergedStage = false;
+  assert.equal(document.querySelector("#summary").value, "");
+  assert.match(
+    document.querySelector(".message").textContent,
+    /Committed new-head.*Refresh failed/,
+  );
+  document.querySelector("#edit-mode").click();
   assert.equal(document.querySelector(".sidebar").inert, false);
   document.querySelector("#query").value = "nonexistent phrase";
   await app.action("find-next");
@@ -503,6 +557,37 @@ try {
   assert.ok(
     stageView.textContent.includes("9001"),
     "scrolling renders distant rows",
+  );
+  const firstCheck = stageView.querySelector("input:not(:disabled)");
+  firstCheck.focus();
+  stageView.scrollTop += 1000;
+  stageView.dispatchEvent(new Event("scroll"));
+  assert.equal(
+    document.activeElement,
+    firstCheck,
+    "scroll preserves the focused input",
+  );
+  firstCheck.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "End",
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  assert.equal(
+    document.activeElement.closest("[data-virtual-index]").dataset.virtualIndex,
+    "9999",
+  );
+  document.activeElement.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Home",
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  assert.equal(
+    document.activeElement.closest("[data-virtual-index]").dataset.virtualIndex,
+    "0",
   );
   stageRowCount = 2;
   document.querySelector("#edit-mode").click();
@@ -593,6 +678,76 @@ try {
     app.past.focus();
     app.past.dispatch({ selection: { anchor: app.past.state.doc.length - 1 } });
   }
+  app.active.changes = [
+    { a: 0, aEnd: 3, b: 0, bEnd: 3 },
+    { a: 5, aEnd: 8, b: 5, bEnd: 8 },
+  ];
+  app.past.focus();
+  app.past.dispatch({ selection: { anchor: 0, head: 8 } });
+  assert.equal(
+    app.selectedChanges().length,
+    2,
+    "past-pane selection includes both changes",
+  );
+  assert.equal(app.menuAvailability().restore, true);
+  const beforePastRestore = app.editor.state.doc.toString();
+  await app.action("restore");
+  assert.equal(
+    app.editor.state.doc.toString(),
+    base.slice(0, 3) +
+      beforePastRestore.slice(3, 5) +
+      base.slice(5, 8) +
+      beforePastRestore.slice(8),
+  );
+  await app.flush(app.active);
+  inspectedPaths.length = 0;
+  failInspections = true;
+  await assert.rejects(app.foreground(), /Cannot inspect/);
+  assert.deepEqual(new Set(inspectedPaths), new Set([...app.buffers.keys()]));
+  failInspections = false;
+  localStorage.setItem(
+    "preferences",
+    JSON.stringify({
+      font: 20,
+      wrap: false,
+      whitespace: true,
+      pastHeight: 999,
+    }),
+  );
+  // A local change must preserve another window's newer unrelated fields.
+  await app.action("whitespace");
+  assert.equal(JSON.parse(localStorage.getItem("preferences")).font, 20);
+  window.dispatchEvent(
+    new window.StorageEvent("storage", { key: "preferences" }),
+  );
+  assert.equal(
+    document.documentElement.style.getPropertyValue("--font"),
+    "20px",
+  );
+  assert.equal(
+    document.documentElement.style.getPropertyValue("--past"),
+    "45px",
+  );
+  // The clean cache is bounded without dropping an edited document's history.
+  for (let i = 0; i < 40; i++) {
+    const path = `cache-${i}.txt`;
+    switchDocuments[path] = {
+      path,
+      base: "cache\n",
+      text: "cache\n",
+      disk: "cache\n",
+      version: 0,
+      head: "h",
+      baseExists: true,
+    };
+    await app.activate(path);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(app.buffers.size <= 32);
+  assert.ok(releasedPaths.length >= 8);
+  assert.ok(app.buffers.has("fixture.tex"), "edited history remains available");
+  await app.activate("cache-0.txt");
+  assert.equal(app.active.state.doc.toString(), "cache\n");
   console.log(
     "Editor parity: immediate paint, undo, search, navigation, staging, commit lock/selection, Quick Open virtualization: passed",
   );

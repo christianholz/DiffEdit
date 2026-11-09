@@ -2,7 +2,9 @@ mod app_menu;
 mod diff;
 mod document;
 mod repository;
-use document::{Document, Edit, Inspection, Resolved, Saved, Selection, StageSnapshot, Update};
+use document::{
+    Document, Edit, Inspection, Resolved, ReviewSource, Saved, Selection, StageSnapshot, Update,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, HashSet},
@@ -294,6 +296,25 @@ async fn open_document(
     })
     .await
 }
+// Only evict an unchanged native document. The frontend serializes release/open
+// for each path and retains dirty documents, pending selections and undo history.
+#[tauri::command]
+fn release_document(
+    window: tauri::Window,
+    state: tauri::State<'_, Service>,
+    path: String,
+    version: u64,
+) -> Result<(), String> {
+    let w = state.workspace(window.label());
+    let mut w = w.lock().unwrap();
+    if let Some(d) = w.documents.get(&path) {
+        if d.version != version || d.text.as_str() != d.disk.as_deref().unwrap_or_default() {
+            return Err("Document changed before cache release".into());
+        }
+    }
+    w.documents.remove(&path);
+    Ok(())
+}
 #[tauri::command]
 async fn edit_document(
     window: tauri::Window,
@@ -379,7 +400,7 @@ async fn inspect_document(
                 return Err("Repository changed during inspection".into());
             }
             let d = w.documents.get_mut(&path).ok_or("Document not open")?;
-            let changed = d.base != base || head != repo.head;
+            let changed = d.base != base || d.base_exists != base_exists || head != repo.head;
             d.base = base.clone();
             d.base_exists = base_exists;
             d.head = repo.head.clone();
@@ -460,6 +481,7 @@ async fn stage_rows(
     window: tauri::Window,
     state: tauri::State<'_, Service>,
     path: String,
+    source: Option<ReviewSource>,
 ) -> Result<StageSnapshot, String> {
     let w = state.workspace(window.label());
     work(move || {
@@ -470,7 +492,7 @@ async fn stage_rows(
                 w.documents.get(&path).ok_or("Document not open")?.clone(),
             )
         };
-        d.stage_snapshot(&repo)
+        d.review(&repo, source)
     })
     .await
 }
@@ -496,7 +518,7 @@ async fn commit_changes(
     message: String,
     selections: Vec<Selection>,
     index: String,
-) -> Result<String, String> {
+) -> Result<repository::GitOutcome, String> {
     let w = state.workspace(window.label());
     work(move || {
         let PreparedSelection { repo, entries } =
@@ -524,7 +546,7 @@ fn prepare_selection(w: &Workspace, selections: &[Selection]) -> Result<Prepared
         if d.head != repo.head {
             return Err("HEAD changed; refresh before committing".into());
         }
-        entries.push((selection.path.clone(), d.selected_text(selection)?));
+        entries.push((selection.path.clone(), d.selected_entry(repo, selection)?));
     }
     Ok(PreparedSelection {
         repo: repo.clone(),
@@ -678,6 +700,7 @@ fn main() {
             open_folder,
             refresh,
             open_document,
+            release_document,
             edit_document,
             sync_document,
             document_diff,

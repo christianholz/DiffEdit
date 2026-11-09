@@ -50,6 +50,7 @@ impl Drop for Fixture {
 }
 fn all(d: &Document) -> Selection {
     Selection {
+        source: crate::document::ReviewSource::Buffer,
         path: d.path.clone(),
         version: d.version,
         head: d.head.clone(),
@@ -119,7 +120,7 @@ fn selected_commit_is_multi_file_and_preserves_unsaved_work() {
     assert_eq!(f.git(&["diff", "--cached", "--name-only"]), "");
 }
 #[test]
-fn existing_partial_index_is_reflected_and_unrepresentable_content_is_rejected() {
+fn existing_partial_index_and_divergent_staged_version_are_reviewable() {
     let f = Fixture::new();
     f.write("a", "old\nanchor\nold\n");
     f.commit();
@@ -130,6 +131,7 @@ fn existing_partial_index_is_reflected_and_unrepresentable_content_is_rejected()
     let d = Document::open(&r, "a".into()).unwrap();
     let snapshot = d.stage_snapshot(&r).unwrap();
     let selection = Selection {
+        source: crate::document::ReviewSource::Buffer,
         path: d.path.clone(),
         version: d.version,
         head: d.head.clone(),
@@ -141,7 +143,10 @@ fn existing_partial_index_is_reflected_and_unrepresentable_content_is_rejected()
     );
     f.write("a", "different\n");
     let d = Document::open(&r, "a".into()).unwrap();
-    assert!(d.stage_snapshot(&r).is_err());
+    assert_eq!(
+        d.stage_snapshot(&r).unwrap().source,
+        crate::document::ReviewSource::Index
+    );
 }
 #[test]
 fn failed_hook_preserves_index_head_and_working_files() {
@@ -295,4 +300,163 @@ fn switching_branches_at_the_same_commit_invalidates_review() {
     )
     .is_err());
     assert_eq!(f.git(&["show", "HEAD:a"]), "old\n");
+}
+
+#[test]
+fn staged_version_remains_reviewable_after_buffer_replacement() {
+    use crate::document::ReviewSource;
+    let f = Fixture::new();
+    f.write("a", "old\n");
+    f.commit();
+    f.write("a", "new\n");
+    f.git(&["add", "a"]);
+    f.write("a", "refined\n");
+    let r = f.repo();
+    assert_eq!(r.partial_staged, vec!["a"]);
+    let d = Document::open(&r, "a".into()).unwrap();
+    let snapshot = d.review(&r, None).unwrap();
+    assert_eq!(snapshot.source, ReviewSource::Index);
+    let selection = Selection {
+        source: snapshot.source,
+        path: "a".into(),
+        version: d.version,
+        head: d.head.clone(),
+        selected: snapshot.selected,
+    };
+    assert_eq!(
+        d.selected_entry(&r, &selection).unwrap(),
+        Some("new\n".into())
+    );
+    let buffer = d.review(&r, Some(ReviewSource::Buffer)).unwrap();
+    assert!(buffer.selected.is_empty());
+    let outcome = repository::apply_selection(
+        &r,
+        &r.index,
+        &[("a".into(), d.selected_entry(&r, &selection).unwrap())],
+        Some("commit staged version"),
+    )
+    .unwrap();
+    assert!(outcome.committed);
+    assert!(outcome.oid.is_some());
+    assert_eq!(f.git(&["show", "HEAD:a"]), "new\n");
+    assert_eq!(fs::read_to_string(f.0.join("a")).unwrap(), "refined\n");
+}
+
+#[test]
+fn crlf_checkout_is_clean_and_selected_commit_uses_git_clean_filters() {
+    let f = Fixture::new();
+    f.write(".gitattributes", "*.txt text eol=crlf\n");
+    f.write("a.txt", "old\r\n");
+    f.commit();
+    let r = f.repo();
+    assert!(r.changed.is_empty());
+    let mut d = Document::open(&r, "a.txt".into()).unwrap();
+    assert_eq!(d.base, "old\r\n");
+    assert!(d.rows().iter().all(|row| row.id.is_none()));
+    d.text = "new\r\n".into();
+    let entry = d.selected_entry(&r, &all(&d)).unwrap();
+    repository::apply_selection(&r, &r.index, &[("a.txt".into(), entry)], Some("CRLF edit"))
+        .unwrap();
+    assert_eq!(f.git(&["show", "HEAD:a.txt"]), "new\n");
+    assert_eq!(fs::read_to_string(f.0.join("a.txt")).unwrap(), "old\r\n");
+}
+
+#[test]
+fn unchecked_unstaged_binary_does_not_block_selected_text_commit() {
+    let f = Fixture::new();
+    f.write("a", "old\n");
+    f.commit();
+    fs::write(f.0.join("binary"), [0, 1, 2]).unwrap();
+    let r = f.repo();
+    let mut d = Document::open(&r, "a".into()).unwrap();
+    d.text = "new\n".into();
+    repository::apply_selection(
+        &r,
+        &r.index,
+        &[("a".into(), d.selected_entry(&r, &all(&d)).unwrap())],
+        Some("selected text"),
+    )
+    .unwrap();
+    assert_eq!(f.git(&["show", "HEAD:a"]), "new\n");
+    assert_eq!(f.git(&["ls-files", "binary"]), "");
+}
+
+#[test]
+fn commit_reports_success_and_preserves_recovery_index_if_installation_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.write("a", "old\n");
+    f.commit();
+    // Fail only the final installation, after Git has advanced HEAD.
+    let hook = f.0.join(".git/hooks/post-commit");
+    fs::write(&hook, "#!/bin/sh\nrm -f .git/index\nmkdir .git/index\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let r = f.repo();
+    let result = repository::apply_selection(
+        &r,
+        &r.index,
+        &[("a".into(), Some("new\n".into()))],
+        Some("committed despite installation failure"),
+    )
+    .unwrap();
+    assert!(result.committed);
+    assert_eq!(
+        result.oid.as_deref(),
+        Some(f.git(&["rev-parse", "HEAD"]).trim())
+    );
+    assert!(result.warning.as_ref().unwrap().contains("Recovery index:"));
+    let recovery = f.0.join(".git/index.lock");
+    assert!(recovery.is_file());
+    fs::remove_dir(f.0.join(".git/index")).unwrap();
+    fs::rename(&recovery, f.0.join(".git/index")).unwrap();
+    assert_eq!(f.git(&["show", ":a"]), "new\n");
+    assert_eq!(f.git(&["show", "HEAD:a"]), "new\n");
+}
+
+#[test]
+fn ordinary_folder_uses_disk_baseline_and_includes_dotfiles() {
+    let f = Fixture::new();
+    fs::remove_dir_all(f.0.join(".git")).unwrap();
+    f.write(".settings", "value\n");
+    let r = f.repo();
+    assert!(r.files.contains(&".settings".into()));
+    let d = Document::open(&r, ".settings".into()).unwrap();
+    assert_eq!(d.base, d.text);
+    assert!(d.rows().iter().all(|row| row.id.is_none()));
+}
+
+#[test]
+fn ambiguous_git_failure_preserves_candidate_and_does_not_claim_success() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.write("a", "first\n");
+    f.commit();
+    let first = f.git(&["rev-parse", "HEAD"]);
+    f.write("a", "second\n");
+    f.commit();
+    let r = f.repo();
+    // Simulate a hook altering refs before Git can acknowledge a commit.
+    let hook = f.0.join(".git/hooks/pre-commit");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\ngit update-ref HEAD {}\nexit 1\n", first.trim()),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let outcome = repository::apply_selection(
+        &r,
+        &r.index,
+        &[("a".into(), Some("candidate\n".into()))],
+        Some("uncertain"),
+    )
+    .unwrap();
+    assert!(!outcome.committed);
+    assert!(outcome.warning.unwrap().contains("uncertain"));
+    assert_eq!(repository::index_signature(f.root()).unwrap(), r.index);
+    assert!(!f.0.join(".git/index.lock").exists());
+    assert!(fs::read_dir(f.0.join(".git")).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with("diffedit-index-")));
 }

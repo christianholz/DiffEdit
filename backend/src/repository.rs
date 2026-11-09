@@ -22,6 +22,7 @@ pub struct Repo {
     pub search: Vec<String>,
     pub changed: Vec<String>,
     pub staged: Vec<String>,
+    pub partial_staged: Vec<String>,
 }
 pub fn git(root: &str, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>, String> {
     git_index(root, args, input, None)
@@ -141,7 +142,7 @@ fn walk(root: &Path, at: &Path, out: &mut BTreeSet<String>) {
     if let Ok(entries) = fs::read_dir(at) {
         for e in entries.flatten() {
             let p = e.path();
-            if e.file_name().to_string_lossy().starts_with('.') {
+            if e.file_name() == ".git" {
                 continue;
             }
             if let Ok(t) = e.file_type() {
@@ -181,6 +182,7 @@ pub fn discover(root: &str) -> Result<Repo, String> {
         search: vec![],
         changed: vec![],
         staged: vec![],
+        partial_staged: vec![],
     };
     let mut files = BTreeSet::new();
     if let Some(g) = git_root {
@@ -225,11 +227,19 @@ pub fn discover(root: &str) -> Result<Repo, String> {
             None,
         )?);
         let mut changed: HashSet<String> = staged.iter().cloned().collect();
-        changed.extend(strings(git(
+        let unstaged = strings(git(
             &g,
             &["diff", "--no-renames", "--name-only", "-z"],
             None,
-        )?));
+        )?);
+        let unstaged: HashSet<_> = unstaged.into_iter().collect();
+        r.partial_staged = staged
+            .iter()
+            .filter(|p| unstaged.contains(*p))
+            .cloned()
+            .filter_map(&ui)
+            .collect();
+        changed.extend(unstaged);
         changed.extend(strings(git(
             &g,
             &["ls-files", "--others", "--exclude-standard", "-z"],
@@ -294,7 +304,8 @@ fn git_path(r: &Repo, p: &str) -> String {
 }
 pub fn base_entry(r: &Repo, p: &str) -> Result<Option<String>, String> {
     match (&r.git_root, &r.head) {
-        (Some(g), Some(head)) => blob(g, &format!("{head}:{}", git_path(r, p))),
+        (Some(g), Some(head)) => blob(g, &format!("{head}:{}", git_path(r, p)), &git_path(r, p)),
+        (None, _) => disk(r, p),
         _ => Ok(None),
     }
 }
@@ -302,11 +313,11 @@ pub fn base_entry(r: &Repo, p: &str) -> Result<Option<String>, String> {
 pub fn base(r: &Repo, p: &str) -> Result<String, String> {
     base_entry(r, p).map(Option::unwrap_or_default)
 }
-fn blob(g: &str, spec: &str) -> Result<Option<String>, String> {
+fn blob(g: &str, spec: &str, path: &str) -> Result<Option<String>, String> {
     // Verify the tree/index separately so missing paths do not hide Git errors.
     let out = git(
         g,
-        &["cat-file", "--batch", "-z"],
+        &["cat-file", "--batch-check", "-z"],
         Some(format!("{spec}\0").as_bytes()),
     )?;
     let split = out
@@ -321,14 +332,22 @@ fn blob(g: &str, spec: &str) -> Result<Option<String>, String> {
     if fields.len() != 3 || fields[1] != "blob" {
         return Err("Only regular text files can be edited".into());
     }
-    let size: usize = fields[2].parse().map_err(|_| "Invalid Git object size")?;
-    let bytes = out
-        .get(split + 1..split + 1 + size)
-        .ok_or("Truncated Git object")?;
+    // Compare in the same representation Git checks out, including EOL and
+    // configured clean/smudge filters. Staging applies the reverse clean filter.
+    let bytes = git(
+        g,
+        &[
+            "cat-file",
+            "--filters",
+            &format!("--path={path}"),
+            fields[0],
+        ],
+        None,
+    )?;
     if bytes.contains(&0) {
         return Err("Binary files cannot be edited".into());
     }
-    String::from_utf8(bytes.to_vec())
+    String::from_utf8(bytes)
         .map(Some)
         .map_err(|_| "File is not UTF-8".into())
 }
@@ -378,7 +397,7 @@ pub fn validate_file_mode(r: &Repo, p: &str) -> Result<(), String> {
 }
 pub fn index_text(r: &Repo, p: &str) -> Result<Option<String>, String> {
     let g = r.git_root.as_ref().ok_or("Not a Git repository")?;
-    blob(g, &format!(":{}", git_path(r, p)))
+    blob(g, &format!(":{}", git_path(r, p)), &git_path(r, p))
 }
 fn head(g: &str) -> Result<Option<String>, String> {
     let resolved = git(g, &["rev-parse", "--verify", "HEAD"], None);
@@ -569,6 +588,15 @@ fn stage_entry(r: &Repo, p: &str, text: Option<&str>, index: Option<&Path>) -> R
     Ok(())
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitOutcome {
+    pub output: String,
+    pub committed: bool,
+    pub oid: Option<String>,
+    pub warning: Option<String>,
+}
+
 // Lock the real index and prepare changes in a private copy. Validation and hook
 // failures leave the real index untouched; successful commits install its exact
 // resulting index. Other windows and external Git writers obey index.lock too.
@@ -577,7 +605,7 @@ pub fn apply_selection(
     expected_index: &str,
     entries: &[(String, Option<String>)],
     message: Option<&str>,
-) -> Result<String, String> {
+) -> Result<GitOutcome, String> {
     let g = r.git_root.as_ref().ok_or("Not a Git repository")?;
     let index_path = git(
         g,
@@ -611,7 +639,7 @@ pub fn apply_selection(
             .unwrap()
             .as_nanos()
     ));
-    let _cleanup = Cleanup(vec![
+    let mut cleanup = Cleanup(vec![
         lock_path.clone(),
         temp.clone(),
         temp.with_extension("lock"),
@@ -645,21 +673,62 @@ pub fn apply_selection(
             );
         }
         verify(r, expected_index)?;
-        output = String::from_utf8_lossy(&git_index(
+        match git_index(
             g,
             &["commit", "-F", "-"],
             Some(message.as_bytes()),
             Some(&temp),
-        )?)
-        .into();
+        ) {
+            Ok(bytes) => output = String::from_utf8_lossy(&bytes).into(),
+            Err(error) => {
+                let observed = head(g);
+                if matches!(&observed, Ok(oid) if oid == &r.head) {
+                    return Err(error);
+                }
+                // Git did not acknowledge completion and HEAD changed or could
+                // not be read. Preserve the candidate without installing it.
+                cleanup.0.retain(|p| p != &temp);
+                return Ok(GitOutcome {
+                    output,
+                    committed: false,
+                    oid: observed.ok().flatten(),
+                    warning: Some(format!("Git outcome is uncertain: {error}. Inspect HEAD before retrying. Recovery index: {}", temp.display())),
+                });
+            }
+        }
     }
-    fs::File::open(&temp)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| e.to_string())?;
-    fs::rename(&temp, &lock_path).map_err(|e| e.to_string())?;
-    fs::rename(&lock_path, &index_path)
-        .map_err(|e| format!("Git operation finished but index installation failed: {e}"))?;
-    Ok(output)
+    let oid = if message.is_some() {
+        head(g).ok().flatten()
+    } else {
+        None
+    };
+    let install = (|| -> Result<(), String> {
+        fs::File::open(&temp)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())?;
+        fs::rename(&temp, &lock_path).map_err(|e| e.to_string())?;
+        fs::rename(&lock_path, &index_path).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    let warning = match install {
+        Ok(()) => None,
+        Err(error) if message.is_some() => {
+            // HEAD has advanced. Retain the exact candidate index for recovery.
+            let recovery = if temp.exists() { &temp } else { &lock_path };
+            cleanup.0.retain(|p| p != recovery);
+            Some(format!(
+                "Commit completed, but index installation failed: {error}. Recovery index: {}",
+                recovery.display()
+            ))
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(GitOutcome {
+        output,
+        committed: message.is_some(),
+        oid,
+        warning,
+    })
 }
 #[cfg(test)]
 mod tests {

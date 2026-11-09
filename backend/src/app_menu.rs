@@ -42,6 +42,7 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             ("open", "Open Folder…", Some("CmdOrCtrl+O")),
             ("save", "Save", Some("CmdOrCtrl+S")),
             ("save-all", "Save All", Some("CmdOrCtrl+Shift+S")),
+            ("refresh", "Refresh", Some("CmdOrCtrl+R")),
             ("close", "Close Window", Some("CmdOrCtrl+W")),
         ],
     )?;

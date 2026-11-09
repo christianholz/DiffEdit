@@ -19,6 +19,7 @@ export interface Repo {
   files: string[];
   changed: string[];
   staged: string[];
+  partialStaged?: string[];
 }
 export interface Document {
   path: string;
@@ -42,6 +43,7 @@ export interface DiffUpdate {
   diff: Diff;
 }
 export interface StageSnapshot {
+  source: "buffer" | "index";
   version: number;
   head: string | null;
   index: string;

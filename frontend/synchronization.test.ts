@@ -197,3 +197,14 @@ test("word correspondence handles astral letters and combining marks", () => {
   assert.deepEqual(wordRange("𐐀bc café", 2), [0, 4]);
   assert.deepEqual(wordRange("𐐀bc café", 9), [5, 10]);
 });
+
+test("preferences remain readable when browser storage is unavailable", () => {
+  const prefs = readPreferences({
+    getItem() {
+      throw Error("Storage unavailable");
+    },
+  });
+  assert.equal(prefs.font, 13);
+  assert.equal(prefs.sidebarWidth, 240);
+  assert.equal(prefs.wrap, true);
+});
