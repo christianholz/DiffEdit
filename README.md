@@ -59,7 +59,7 @@ synchronize across windows, tolerate unavailable storage, and fit the viewport.
 
 ## Build and run
 
-Requirements: macOS 13 or newer, Xcode command-line tools, Rust stable, Git, and
+Requirements: macOS 14 or newer, Xcode command-line tools, Rust stable, Git, and
 Node.js 22.12 or newer. Dependency versions are pinned in the npm and Cargo lockfiles.
 
 From the repository root:

@@ -5,6 +5,8 @@
   font-size: 13px;
   color-scheme: dark;
   --font: 13px;
+  --code-font-family: Menlo, Monaco, monospace;
+  --code-line-height: 1.4;
   --past: 120px;
   --sidebar: 240px;
 }
@@ -191,13 +193,14 @@ header .root {
   height: 100%;
   font-size: var(--font);
 }
-.cm-scroller {
-  font-family: Menlo, Monaco, monospace !important;
-  line-height: 1.55;
+#app .cm-scroller {
+  font-family: var(--code-font-family);
+  line-height: var(--code-line-height);
   overflow: auto !important;
 }
 .cm-content {
   padding: 8px 0 !important;
+  cursor: text;
 }
 .cm-line {
   padding: 0 18px !important;
@@ -237,22 +240,20 @@ header .root {
 .past-focus.deleted {
   background: #e454549e;
 }
-.diff-marker {
-  display: inline-block;
-  width: 2px;
-  height: 1.1em;
-  vertical-align: text-bottom;
-  background: #ed7474;
-  margin: 0;
+.diff-markers {
   pointer-events: none;
+}
+.diff-marker {
+  background: #ab6868;
+}
+.diff-marker.active {
+  background: #cb7777;
 }
 .diff-marker.insert {
   background: #76c47c;
 }
 .diff-marker.line {
-  width: 100%;
-  height: 2px;
-  display: block;
+  background: #ed7474;
 }
 .search {
   border-top: 1px solid #48484e;
@@ -287,17 +288,16 @@ header .root {
   white-space: nowrap;
 }
 .stage {
-  line-height: 1.55;
+  line-height: var(--code-line-height);
   flex: 1;
   min-height: 0;
   overflow: auto;
-  font-family: Menlo, monospace;
+  font-family: var(--code-font-family);
   font-size: var(--font);
 }
 .stage-row {
   display: flex;
-  align-items: flex-start;
-  min-height: 23px;
+  align-items: center;
   white-space: pre;
   cursor: pointer;
 }
@@ -311,7 +311,10 @@ header .root {
   opacity: 0.45;
 }
 .stage-row input {
-  margin: 5px 8px;
+  flex: none;
+  width: min(13px, 1em);
+  height: min(13px, 1em);
+  margin: 0 8px;
 }
 .stage-row .numbers {
   width: 80px;
@@ -321,7 +324,7 @@ header .root {
   padding-right: 10px;
 }
 .stage-row .code {
-  padding: 3px 8px;
+  padding-inline: 8px;
 }
 .stage-tools {
   padding: 8px;
@@ -453,30 +456,9 @@ body.resizing {
   padding: 0 12px 8px;
 }
 .cm-lineWrapping {
-  overflow-wrap: normal !important;
-  word-break: normal !important;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
-.diff-marker:not(.line) {
-  display: inline;
-  width: 0;
-  height: auto;
-  background: none;
-  position: relative;
-}
-.diff-marker:not(.line)::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0;
-  height: 1.1em;
-  width: 2px;
-  background: #ed7474;
-  pointer-events: none;
-}
-.diff-marker.insert:not(.line)::after {
-  background: #76c47c;
-}
-
 .sidebar > .root {
   padding: 12px;
   overflow: hidden;
@@ -486,9 +468,6 @@ body.resizing {
 .cm-activeLine {
   color: #f1f1f4;
 }
-.diff-marker:not(.line)::after {
-  width: 4px;
-}
 
 .divider {
   height: 14px;
@@ -497,14 +476,6 @@ body.resizing {
 }
 .past {
   padding: 5px 0 0;
-}
-.diff-marker:not(.line)::after {
-  top: 0.05em;
-  height: 1.2em;
-  background: #cb7777;
-}
-.diff-marker.insert:not(.line)::after {
-  background: #76c47c;
 }
 .tree input[type="checkbox"] {
   flex: none;
@@ -580,23 +551,12 @@ body.resizing {
   margin: 0;
 }
 
-/* Leave a two-pixel gap at deletions; keep the marker behind adjacent glyphs. */
 .cm-line {
   position: relative;
   isolation: isolate;
 }
-.diff-marker:not(.insert):not(.line) {
-  padding-inline: 1px;
-}
-.diff-marker:not(.insert):not(.line)::after {
-  left: -1px;
-  z-index: -1;
-}
-.now .cm-line:not(.cm-activeLine) .addition {
+.now .diff-fill.addition:not(.active) {
   background: #58b96055;
-}
-.now .cm-line:not(.cm-activeLine) .diff-marker:not(.insert)::after {
-  background: #ab6868;
 }
 .past .deletion {
   background: #c25a5a50;
@@ -606,15 +566,6 @@ body.resizing {
 }
 .past .cm-content {
   padding: 0 !important;
-}
-
-/* Pad only changed spans, extending their background along with the spacing.
-   Keep normal inline wrapping, with padding at the span's outer edges only. */
-.now .addition,
-.past .deletion {
-  padding-inline: 1px;
-  -webkit-box-decoration-break: slice;
-  box-decoration-break: slice;
 }
 
 /* The top breathing room must stay outside the scrolling document. */

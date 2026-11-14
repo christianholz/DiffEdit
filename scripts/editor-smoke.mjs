@@ -299,7 +299,7 @@ const source =
     'import "./style.css";',
     "",
   ) +
-  "\nexport {active,foreground,resolve,closeWindow,editor,past,activate,openFolder,action,flush,buffers,save,selectedChanges,restoreChanges,mappedSelection,renderStage,commit,stage,busy,decorations,filterQuick,quickMatches,menuAvailability};";
+  "\nexport {reloadViewportKey,active,foreground,resolve,closeWindow,editor,past,activate,openFolder,action,flush,buffers,save,selectedChanges,restoreChanges,mappedSelection,renderStage,commit,stage,busy,decorations,filterQuick,quickMatches,menuAvailability};";
 await mkdir("node_modules/.cache", { recursive: true });
 const built = await build({
   stdin: {
@@ -370,9 +370,11 @@ try {
       immediate.push([from, to]),
     );
   assert.deepEqual(immediate, [[base.length, base.length + 4]]);
+  const greenBeforeAck = app.editor.state.field(app.decorations);
   assert.equal(app.menuAvailability().save, true);
   assert.equal(app.menuAvailability().undo, true);
   await app.flush(app.buffers.get("fixture.tex"));
+  assert.equal(app.editor.state.field(app.decorations), greenBeforeAck);
   assert.equal(text, base + "word");
   await app.action("undo");
   await app.flush(app.buffers.get("fixture.tex"));
@@ -573,7 +575,10 @@ try {
     "large stage view is virtualized",
   );
   const stageView = document.querySelector(".stage");
-  stageView.scrollTop = 9000 * 26.15;
+  const rowHeight = parseFloat(
+    stageView.querySelector(".stage-row").style.height,
+  );
+  stageView.scrollTop = 9000 * rowHeight;
   stageView.dispatchEvent(new Event("scroll"));
   assert.ok(
     stageView.textContent.includes("9001"),
@@ -626,8 +631,30 @@ try {
   await inspecting;
   assert.ok(app.editor.state.doc.toString().endsWith("!"));
   await app.save();
-  disk = "External replacement.\n";
+  const scroller = app.editor.scrollDOM;
+  scroller.scrollTop = 320;
+  scroller.scrollLeft = 40;
+  let restoreViewport;
+  const requestMeasure = app.editor.requestMeasure.bind(app.editor);
+  app.editor.requestMeasure = (request) => {
+    if (request?.key === app.reloadViewportKey) {
+      restoreViewport = () => request.write(null, app.editor);
+    } else requestMeasure(request);
+  };
+  const setStateBeforeReload = app.editor.setState.bind(app.editor);
+  app.editor.setState = (state) => {
+    setStateBeforeReload(state);
+    // Mimic a renderer clamping offsets while the viewport is rebuilt.
+    scroller.scrollTop = scroller.scrollLeft = 0;
+  };
+  disk = "External replacement.\n".repeat(100);
   await app.foreground();
+  app.editor.setState = setStateBeforeReload;
+  app.editor.requestMeasure = requestMeasure;
+  assert.ok(restoreViewport, "reload queues a viewport restore after layout");
+  restoreViewport();
+  assert.equal(scroller.scrollTop, 320);
+  assert.equal(scroller.scrollLeft, 40);
   assert.equal(app.editor.state.doc.toString(), disk);
   const rangesAfterReload = app.editor.state.field(app.decorations).iter();
   while (rangesAfterReload.value) {

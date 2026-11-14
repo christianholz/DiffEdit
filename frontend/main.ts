@@ -2,8 +2,9 @@ import { virtualRows, clearVirtualRows } from "./virtual-rows";
 import { DialogQueue } from "./dialogs";
 import { BufferStore, DocumentSync } from "./synchronization";
 import { readPreferences } from "./preferences";
-import { pastViewport, wholeRowScroll } from "./past-viewport";
+import { pastViewport } from "./past-viewport";
 import { editorStyleNonce } from "./editor-style";
+import { diffMarkers, Marker } from "./diff-markers";
 import { previewChanges } from "./preview";
 import {
   EditorState,
@@ -18,7 +19,6 @@ import {
   EditorView,
   Decoration,
   DecorationSet,
-  WidgetType,
   keymap,
   lineNumbers,
   highlightActiveLine,
@@ -57,6 +57,7 @@ import {
   Repo,
   Document,
   StageRow,
+  pairedStageRows,
   visible,
   visibleInNow,
   changedLineTargets,
@@ -102,14 +103,47 @@ interface BufferState extends Omit<Document, "text"> {
 }
 const wrapConfig = new Compartment();
 const pastWrapConfig = new Compartment();
+const reloadViewportKey = {};
+const setPreviewDiff = StateEffect.define<Change[]>();
+const previewDiff = StateField.define<Change[]>({
+  create: () => [],
+  update(value, tr) {
+    return (
+      tr.effects.find((effect) => effect.is(setPreviewDiff))?.value ?? value
+    );
+  },
+});
+function sameDecorations(a: DecorationSet, b: DecorationSet): boolean {
+  if (a === b) return true;
+  if (a.size !== b.size) return false;
+  const left = a.iter(),
+    right = b.iter();
+  while (left.value && right.value) {
+    if (
+      left.from !== right.from ||
+      left.to !== right.to ||
+      left.value.startSide !== right.value.startSide ||
+      left.value.endSide !== right.value.endSide ||
+      !left.value.eq(right.value)
+    )
+      return false;
+    left.next();
+    right.next();
+  }
+  return true;
+}
 const setDecorations = StateEffect.define<DecorationSet>();
 const decorations = StateField.define<DecorationSet>({
   create: () => Decoration.none,
   update(value, tr) {
-    for (const e of tr.effects) if (e.is(setDecorations)) return e.value;
-    return value.map(tr.changes);
+    const mapped = value.map(tr.changes);
+    for (const e of tr.effects)
+      if (e.is(setDecorations))
+        return !tr.docChanged && sameDecorations(mapped, e.value)
+          ? mapped
+          : e.value;
+    return mapped;
   },
-  provide: (f) => EditorView.decorations.from(f),
 });
 const setCorrespondence = StateEffect.define<DecorationSet>();
 const correspondence = StateField.define<DecorationSet>({
@@ -119,7 +153,6 @@ const correspondence = StateField.define<DecorationSet>({
     for (const e of tr.effects) if (e.is(setCorrespondence)) value = e.value;
     return value;
   },
-  provide: (f) => EditorView.decorations.from(f),
 });
 function mappedSelection(reverse = false): [number, number][] {
   if (!active) return [];
@@ -167,25 +200,6 @@ function reflectPastSelection() {
     ),
   });
 }
-class Marker extends WidgetType {
-  constructor(
-    readonly green = false,
-    readonly horizontal = false,
-  ) {
-    super();
-  }
-  eq(o: Marker) {
-    return o.green === this.green && o.horizontal === this.horizontal;
-  }
-  toDOM() {
-    let s = document.createElement("span");
-    s.className =
-      "diff-marker" +
-      (this.green ? " insert" : "") +
-      (this.horizontal ? " line" : "");
-    return s;
-  }
-}
 let splitUndo = false,
   lastInputClass = "";
 let quitPending: number | null = null;
@@ -209,23 +223,14 @@ const editor = new EditorView({
         if (b.selectionDirty) b.selectionInvalid = true;
         b.selection = null;
         b.source = null;
-        b.changes = previewChanges(b.changes, b.base, tr);
+        b.changes = tr.state.field(previewDiff);
         b.state = editor.state;
         b.sync.enqueue(tr.changes);
         updateTitle();
         updateFileIndicator(b);
       } else if (tr.selection) splitUndo = true;
     }
-    if (trs.some((tr) => tr.docChanged)) {
-      scheduleOverview();
-      editor.update([
-        editor.state.update({
-          effects: setDecorations.of(
-            marks(b.changes, b.base, editor.state.doc),
-          ),
-        }),
-      ]);
-    }
+    if (trs.some((tr) => tr.docChanged)) scheduleOverview();
     b.state = editor.state;
     updatePast();
     updateStatus();
@@ -242,6 +247,7 @@ const past = new EditorView({
       EditorState.lineSeparator.of("\n"),
       lineNumbers(),
       decorations,
+      diffMarkers(decorations),
       EditorView.updateListener.of((u) => {
         if (u.selectionSet && u.view.hasFocus) {
           reflectPastSelection();
@@ -281,15 +287,37 @@ function makeState(text: string) {
   return EditorState.create({
     doc: text,
     extensions: [
-      wholeRowScroll,
       editorStyleNonce(),
       EditorState.lineSeparator.of("\n"),
       lineNumbers(),
       drawSelection(),
       highlightActiveLine(),
       correspondence,
+      diffMarkers(decorations, correspondence),
       highlightSelectionMatches(),
       decorations,
+      previewDiff,
+      EditorState.transactionExtender.of((tr) => {
+        if (
+          !tr.docChanged ||
+          !active ||
+          quitPending ||
+          operationBusy ||
+          active.locked
+        )
+          return null;
+        const changes = previewChanges(
+          tr.startState.field(previewDiff),
+          active.base,
+          tr,
+        );
+        return {
+          effects: [
+            setPreviewDiff.of(changes),
+            setDecorations.of(marks(changes, active.base, tr.newDoc)),
+          ],
+        };
+      }),
       history({
         newGroupDelay: 1e9,
         joinToEvent: (tr, adjacent) =>
@@ -832,7 +860,10 @@ function applyDiff(b: BufferState) {
   if (active !== b) return;
   const text = editor.state.doc;
   editor.dispatch({
-    effects: setDecorations.of(marks(b.changes, b.base, text)),
+    effects: [
+      setPreviewDiff.of(b.changes),
+      setDecorations.of(marks(b.changes, b.base, text)),
+    ],
   });
   b.state = editor.state;
   updatePast();
@@ -928,36 +959,42 @@ function updatePast() {
             ),
           ]
         : [];
-  past.dispatch({
-    ...(baseChanged
-      ? {
-          changes: { from: 0, to: past.state.doc.length, insert: b.base },
-          selection: { anchor: 0 },
-        }
-      : {}),
-    effects: [
-      setDecorations.of(d.update({ add: extra, sort: true })),
-      ...(movePast
-        ? [
-            EditorView.scrollIntoView(
-              ranges.length
-                ? EditorSelection.range(
-                    ranges.reduce(
-                      (min, [start]) => Math.min(min, start),
-                      Infinity,
-                    ),
-                    ranges.reduce((max, [, end]) => Math.max(max, end), 0),
-                  )
-                : Math.min(target, b.base.length),
-              {
-                y: "center",
-                x: "nearest",
-              },
-            ),
-          ]
-        : []),
-    ],
-  });
+  const nextMarks = d.update({ add: extra, sort: true });
+  if (
+    baseChanged ||
+    movePast ||
+    !sameDecorations(past.state.field(decorations), nextMarks)
+  )
+    past.dispatch({
+      ...(baseChanged
+        ? {
+            changes: { from: 0, to: past.state.doc.length, insert: b.base },
+            selection: { anchor: 0 },
+          }
+        : {}),
+      effects: [
+        setDecorations.of(nextMarks),
+        ...(movePast
+          ? [
+              EditorView.scrollIntoView(
+                ranges.length
+                  ? EditorSelection.range(
+                      ranges.reduce(
+                        (min, [start]) => Math.min(min, start),
+                        Infinity,
+                      ),
+                      ranges.reduce((max, [, end]) => Math.max(max, end), 0),
+                    )
+                  : Math.min(target, b.base.length),
+                {
+                  y: "center",
+                  x: "nearest",
+                },
+              ),
+            ]
+          : []),
+      ],
+    });
   pastScrollFocus = scrollFocus;
   lastPastKey = key;
   lastPastBase = b.base;
@@ -1220,12 +1257,19 @@ async function resolve(b: BufferState, reload: boolean) {
     b.baseExists = d.baseExists;
     b.head = d.head;
     b.version = d.version;
+    let viewport: { top: number; left: number } | undefined;
     if (reload) {
       if (b.selectionDirty) b.selectionInvalid = true;
       b.selection = null;
       b.source = null;
       const head = b.state.selection.main.head;
-      const scroll = active === b ? editor.scrollDOM.scrollTop : b.scroll;
+      if (active === b && mode() === "edit") {
+        viewport = {
+          top: editor.scrollDOM.scrollTop,
+          left: editor.scrollDOM.scrollLeft,
+        };
+        b.scroll = viewport.top;
+      }
       b.state = makeState(d.text);
       b.state = b.state.update({
         selection: { anchor: Math.min(head, b.state.doc.length) },
@@ -1233,10 +1277,28 @@ async function resolve(b: BufferState, reload: boolean) {
       b.revision++;
       if (active === b) {
         editor.setState(b.state);
-        editor.scrollDOM.scrollTop = scroll;
+        editor.dispatch({
+          effects: wrapConfig.reconfigure(wrap ? EditorView.lineWrapping : []),
+        });
       }
     }
     if (active === b) applyDiff(b);
+    if (viewport) {
+      const { top, left } = viewport;
+      const doc = editor.state.doc;
+      // setState rebuilds the viewport. Restore after CodeMirror measures the
+      // replacement, when WebKit can clamp against its actual scroll bounds.
+      editor.requestMeasure({
+        key: reloadViewportKey,
+        read: () => null,
+        write: (_, view) => {
+          if (active !== b || view.state.doc !== doc || mode() !== "edit")
+            return;
+          view.scrollDOM.scrollTop = top;
+          view.scrollDOM.scrollLeft = left;
+        },
+      });
+    }
     updateTitle();
     renderTree();
   } finally {
@@ -1631,7 +1693,8 @@ async function renderStage() {
     b.selectionInvalid = false;
     b.selectionDirty = false;
   }
-  const rows = b.rows;
+  const snapshotRows = b.rows;
+  const rows = pairedStageRows(snapshotRows);
   const source = document.createElement("select");
   source.setAttribute("aria-label", "Review version");
   for (const [value, label] of [
@@ -1677,7 +1740,7 @@ async function renderStage() {
   virtualRows(
     el,
     displayed.length,
-    Math.max(23, font * 1.55 + 6),
+    parseFloat(getComputedStyle(el).lineHeight) || font * 1.4,
     (index) => {
       const i = displayed[index];
       if (i === null) {
@@ -1761,7 +1824,7 @@ async function renderStage() {
                   if (
                     active !== b ||
                     b.revision !== revision ||
-                    b.rows !== rows
+                    b.rows !== snapshotRows
                   )
                     return;
                   for (const entry of rows.slice(

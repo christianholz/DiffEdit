@@ -37,6 +37,30 @@ export interface StageRow {
   oldLine: number | null;
   newLine: number | null;
 }
+/** Display replacements in pairs without changing Git's patch order. */
+export function pairedStageRows(rows: readonly StageRow[]): StageRow[] {
+  const paired: StageRow[] = [];
+  let i = 0;
+  while (i < rows.length) {
+    if (rows[i].kind !== "delete") {
+      paired.push(rows[i++]);
+      continue;
+    }
+    const start = i;
+    while (i < rows.length && rows[i].kind === "delete") i++;
+    const inserted = i;
+    while (i < rows.length && rows[i].kind === "insert") i++;
+    for (
+      let offset = 0;
+      offset < Math.max(inserted - start, i - inserted);
+      offset++
+    ) {
+      if (start + offset < inserted) paired.push(rows[start + offset]);
+      if (inserted + offset < i) paired.push(rows[inserted + offset]);
+    }
+  }
+  return paired;
+}
 export interface DiffUpdate {
   version: number;
   head: string | null;

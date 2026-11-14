@@ -31,17 +31,8 @@ export const pastViewport = [
         this.observer = new ResizeObserver(() => this.measure());
         this.observer.observe(view.dom.parentElement!);
         this.observer.observe(view.contentDOM);
-        view.scrollDOM.addEventListener("scroll", this.onScroll);
         this.measure();
       }
-      scrollTimer: ReturnType<typeof setTimeout> | undefined;
-      onScroll = () => {
-        clearTimeout(this.scrollTimer);
-        this.scrollTimer = setTimeout(
-          () => snap(this.view, this.view.scrollDOM.scrollTop),
-          60,
-        );
-      };
       update(update: ViewUpdate) {
         if (!update.docChanged && !update.geometryChanged) return;
         this.measure();
@@ -68,14 +59,11 @@ export const pastViewport = [
               parent.style.height = `${outer}px`;
             if (view.dom.style.height !== `${height}px`)
               view.dom.style.height = `${height}px`;
-            snap(view, view.scrollDOM.scrollTop);
           },
         });
       }
       destroy() {
-        clearTimeout(this.scrollTimer);
         this.observer.disconnect();
-        this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
       }
     },
   ),
@@ -126,44 +114,3 @@ export const pastViewport = [
     return true;
   }),
 ];
-
-// Main-pane scrolling can originate in navigation, restored file positions, or
-// wheel input. Align all of those paths at the same visual-row boundary.
-export const wholeRowScroll = ViewPlugin.fromClass(
-  class {
-    constructor(readonly view: EditorView) {
-      view.scrollDOM.addEventListener("scroll", this.onScroll);
-    }
-    scrollTimer: ReturnType<typeof setTimeout> | undefined;
-    onScroll = () => {
-      clearTimeout(this.scrollTimer);
-      this.scrollTimer = setTimeout(
-        () => snap(this.view, this.view.scrollDOM.scrollTop),
-        60,
-      );
-    };
-    update(update: ViewUpdate) {
-      if (!update.docChanged && !update.geometryChanged) return;
-      this.view.requestMeasure({
-        key: this,
-        read: (view) => view.scrollDOM.clientHeight % view.defaultLineHeight,
-        write: (remainder, view) => {
-          // Make the maximum scroll offset a row boundary too, so reaching the
-          // document end does not reintroduce a clipped first row.
-          const padding = `${remainder}px`;
-          if (view.contentDOM.style.paddingBottom !== padding)
-            view.contentDOM.style.setProperty(
-              "padding-bottom",
-              padding,
-              "important",
-            );
-          snap(view, view.scrollDOM.scrollTop);
-        },
-      });
-    }
-    destroy() {
-      clearTimeout(this.scrollTimer);
-      this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
-    }
-  },
-);

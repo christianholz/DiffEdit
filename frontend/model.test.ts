@@ -4,9 +4,51 @@ import {
   basePosition,
   changeAt,
   changedLineTargets,
+  pairedStageRows,
   wordRange,
   visible,
 } from "./model";
+import type { StageRow } from "./model";
+
+test("commit review pairs replacements within each hunk and keeps row identities", () => {
+  const rows: StageRow[] = [
+    "delete",
+    "delete",
+    "delete",
+    "insert",
+    "insert",
+    "equal",
+    "insert",
+    "equal",
+    "delete",
+    "insert",
+    "insert",
+    "equal",
+    "delete",
+  ].map((kind, i) => ({
+    kind,
+    id: kind === "equal" ? null : String(i),
+    text: String(i),
+    oldLine: null,
+    newLine: null,
+  }));
+  assert.deepEqual(pairedStageRows(rows), [
+    rows[0],
+    rows[3],
+    rows[1],
+    rows[4],
+    rows[2],
+    rows[5],
+    rows[6],
+    rows[7],
+    rows[8],
+    rows[9],
+    rows[10],
+    rows[11],
+    rows[12],
+  ]);
+  assert.equal(rows[1].kind, "delete");
+});
 test("one alignment drives equal text, replacement edges and pure insertions", () => {
   const changes = [
     { a: 3, aEnd: 7, b: 3, bEnd: 9 },
