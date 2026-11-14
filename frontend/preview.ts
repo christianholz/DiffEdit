@@ -72,25 +72,47 @@ export function previewChanges(
       )
         right++;
       if (right && /[\uDC00-\uDFFF]/.test(old[old.length - right])) right--;
-      // A single common letter at a word edge is weak evidence that the
-      // words match. Keep it highlighted with the rest of the replacement.
+      // Trim whole words freely, but retain weak fragments as changed text.
       const word = /[\p{L}\p{N}\p{M}_]/u;
-      if (
-        left === 1 &&
-        word.test(old[0]) &&
-        (word.test(old[1] ?? "") || word.test(now[1] ?? "")) &&
-        Math.max(old.length, now.length) >= 4 &&
-        right < 2
-      )
-        left = 0;
-      if (
-        right === 1 &&
-        word.test(old.at(-1) ?? "") &&
-        (word.test(old.at(-2) ?? "") || word.test(now.at(-2) ?? "")) &&
-        Math.max(old.length, now.length) >= 4 &&
-        left < 2
-      )
-        right = 0;
+      const boundary = (before: string, after: string) =>
+        !word.test(before) || !word.test(after);
+      const keep = (fragment: string, atEdge: boolean) =>
+        (fragment.match(/\p{L}\p{M}*/gu)?.length ?? 0) >= (atEdge ? 3 : 4);
+      if (left < old.length || left < now.length) {
+        const tail =
+          old.slice(0, left).match(/[\p{L}\p{N}\p{M}_]+$/u)?.[0] ?? "";
+        if (
+          tail &&
+          (word.test(old[left] ?? "") || word.test(now[left] ?? ""))
+        ) {
+          const start = left - tail.length;
+          const atEdge =
+            boundary((start ? old[start - 1] : base[c.a - 1]) ?? "", tail) &&
+            boundary(
+              start
+                ? now[start - 1]
+                : tr.newDoc.sliceString(Math.max(0, c.b - 1), c.b),
+              tail,
+            );
+          if (!keep(tail, atEdge)) left = start;
+        }
+        const tailStart = old.length - right;
+        const head =
+          old.slice(tailStart).match(/^[\p{L}\p{N}\p{M}_]+/u)?.[0] ?? "";
+        if (
+          head &&
+          (word.test(old[tailStart - 1] ?? "") ||
+            word.test(now[now.length - right - 1] ?? ""))
+        ) {
+          const atEdge =
+            !word.test(old[tailStart + head.length] ?? base[c.aEnd] ?? "") &&
+            !word.test(
+              now[now.length - right + head.length] ??
+                tr.newDoc.sliceString(c.bEnd, c.bEnd + 1),
+            );
+          if (!keep(head, atEdge)) right -= head.length;
+        }
+      }
       return {
         a: c.a + left,
         aEnd: c.aEnd - right,

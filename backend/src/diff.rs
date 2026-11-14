@@ -77,20 +77,12 @@ fn tokens(s: &str) -> Vec<&str> {
     }
     result
 }
-// Only refine spelling edits within an otherwise recognisable word. Arbitrary
-// shared characters between unrelated words are not useful correspondence.
-fn closely_related(a: &str, b: &str) -> bool {
-    let x: Vec<_> = a.graphemes(true).collect();
-    let y: Vec<_> = b.graphemes(true).collect();
-    let prefix = x.iter().zip(&y).take_while(|(a, b)| a == b).count();
-    let suffix = x[prefix..]
-        .iter()
-        .rev()
-        .zip(y[prefix..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let shared = prefix + suffix;
-    shared >= 3 && shared * 3 >= x.len().max(y.len()) * 2
+// A partial word match needs three letters at a shared word edge, or
+// four consecutive letters inside both words.
+fn strong_word_run(run: &[&str], at_edge: bool) -> bool {
+    let minimum = if at_edge { 3 } else { 4 };
+    run.split(|g| !g.chars().next().is_some_and(char::is_alphabetic))
+        .any(|letters| letters.len() >= minimum)
 }
 fn group_phrases(changes: Vec<Change>, a: &str, b: &str) -> Vec<Change> {
     if changes.is_empty() {
@@ -205,6 +197,22 @@ fn refine(a: &str, b: &str, ao: usize, bo: usize, out: &mut Vec<Change>, depth: 
         .zip(bt[prefix..].iter().rev())
         .take_while(|(a, b)| a == b)
         .count();
+    let (prefix, suffix) = if depth == 0 {
+        (prefix, suffix)
+    } else {
+        (
+            if strong_word_run(&at[..prefix], true) {
+                prefix
+            } else {
+                0
+            },
+            if strong_word_run(&at[at.len() - suffix..], true) {
+                suffix
+            } else {
+                0
+            },
+        )
+    };
     let ae = at.len() - suffix;
     let be = bt.len() - suffix;
     if (ae - prefix).saturating_mul(be - prefix) > 4_000_000 {
@@ -216,7 +224,33 @@ fn refine(a: &str, b: &str, ao: usize, bo: usize, out: &mut Vec<Change>, depth: 
         });
         return;
     }
-    for (ar, br) in hunks(&at[prefix..ae], &bt[prefix..be], Algorithm::Myers) {
+    let mut edits = hunks(&at[prefix..ae], &bt[prefix..be], Algorithm::Myers);
+    if depth != 0 {
+        // Myers can recover matches that were too short at either edge,
+        // or leave tiny islands inside a replacement. Fold those into it.
+        let mut kept = Vec::<(std::ops::Range<usize>, std::ops::Range<usize>)>::new();
+        for (mut ar, mut br) in edits {
+            if let Some((a_prev, b_prev)) = kept.last_mut() {
+                if !strong_word_run(&at[prefix + a_prev.end..prefix + ar.start], false) {
+                    a_prev.end = ar.end;
+                    b_prev.end = br.end;
+                    continue;
+                }
+            } else if !strong_word_run(&at[prefix..prefix + ar.start], true) {
+                ar.start = 0;
+                br.start = 0;
+            }
+            kept.push((ar, br));
+        }
+        if let Some((ar, br)) = kept.last_mut() {
+            if !strong_word_run(&at[prefix + ar.end..ae], true) {
+                ar.end = ae - prefix;
+                br.end = be - prefix;
+            }
+        }
+        edits = kept;
+    }
+    for (ar, br) in edits {
         let ar = ar.start + prefix..ar.end + prefix;
         let br = br.start + prefix..br.end + prefix;
         if depth == 0
@@ -225,7 +259,8 @@ fn refine(a: &str, b: &str, ao: usize, bo: usize, out: &mut Vec<Change>, depth: 
             && ar.len() == 1
             && br.len() == 1
             && a.len() + b.len() < 8192
-            && closely_related(at[ar.start], bt[br.start])
+            && category(at[ar.start]) == 2
+            && category(bt[br.start]) == 2
         {
             let x = at[ar.clone()].concat();
             let y = bt[br.clone()].concat();
@@ -609,6 +644,16 @@ pub fn benchmark(paths: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod regression_tests {
     use super::*;
+    #[test]
+    fn partial_words_require_three_edge_letters_or_four_interior_letters() {
+        let ranges = |a, b| compute(a, b).changes;
+        assert_eq!(ranges("abcX", "abcY")[0].b, 3);
+        assert_eq!(ranges("abX", "abY")[0].b, 0);
+        assert_eq!(ranges("Xabc", "Yabc")[0].b_end, 1);
+        assert_eq!(ranges("XabcZ", "YabcW").len(), 1);
+        assert_eq!(ranges("XabcdZ", "YabcdW").len(), 2);
+        assert!(ranges("a", "a").is_empty());
+    }
     #[test]
     fn unrelated_phrases_do_not_keep_a_single_letter_anchor() {
         let a = "We saw an otter a long time ago.";
