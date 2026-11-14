@@ -163,7 +163,8 @@ header .root {
   border-bottom: 5px solid #242428;
   flex: none;
   background: #34343a;
-  cursor: row-resize;
+  cursor: ns-resize;
+  touch-action: none;
 }
 .now-row {
   flex: 1;
@@ -398,7 +399,10 @@ dialog::backdrop {
 }
 body.resizing {
   user-select: none;
-  cursor: row-resize;
+}
+body.resizing,
+body.resizing * {
+  cursor: ns-resize !important;
 }
 [hidden] {
   display: none !important;
@@ -578,4 +582,9 @@ body.resizing {
 
 #review-source select {
   width: 100%;
+}
+
+/* Draw the partner's outline without adding width or covering the diff fill. */
+.cm-editor .matching-delimiter {
+  box-shadow: inset 0 0 0 1px #d5d5d8;
 }

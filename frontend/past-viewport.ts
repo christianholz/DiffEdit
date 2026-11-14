@@ -1,13 +1,30 @@
 import { EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 
+export function pastPadding(view: EditorView) {
+  const style = getComputedStyle(view.dom.parentElement!);
+  return (
+    (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0)
+  );
+}
+
 function capacity(view: EditorView) {
   const parent = view.dom.parentElement!;
   const style = getComputedStyle(parent);
   const available =
     (parseFloat(style.getPropertyValue("--past")) || parent.clientHeight) -
-    parseFloat(style.paddingTop) -
-    parseFloat(style.paddingBottom);
-  return Math.max(1, Math.floor(available / view.defaultLineHeight));
+    pastPadding(view);
+  return Math.max(1, Math.floor(available / view.defaultLineHeight + 1e-6));
+}
+
+export function applyPastHeight(
+  view: EditorView,
+  height: number,
+  outer: number,
+) {
+  const parent = view.dom.parentElement!;
+  if (parent.style.height !== `${outer}px`) parent.style.height = `${outer}px`;
+  if (view.dom.style.height !== `${height}px`)
+    view.dom.style.height = `${height}px`;
 }
 
 function snap(view: EditorView, top: number) {
@@ -41,24 +58,16 @@ export const pastViewport = [
         this.view.requestMeasure({
           key: this,
           read: (view) => {
-            const style = getComputedStyle(view.dom.parentElement!);
             const height = capacity(view) * view.defaultLineHeight;
             return {
               height,
-              outer:
-                height +
-                parseFloat(style.paddingTop) +
-                parseFloat(style.paddingBottom),
+              outer: height + pastPadding(view),
             };
           },
           write: ({ height, outer }, view) => {
             // Shrink the container too: otherwise its unused remainder becomes
             // a blank strip between the last complete row and the divider.
-            const parent = view.dom.parentElement!;
-            if (parent.style.height !== `${outer}px`)
-              parent.style.height = `${outer}px`;
-            if (view.dom.style.height !== `${height}px`)
-              view.dom.style.height = `${height}px`;
+            applyPastHeight(view, height, outer);
           },
         });
       }

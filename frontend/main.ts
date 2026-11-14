@@ -2,7 +2,7 @@ import { virtualRows, clearVirtualRows } from "./virtual-rows";
 import { DialogQueue } from "./dialogs";
 import { BufferStore, DocumentSync } from "./synchronization";
 import { readPreferences } from "./preferences";
-import { pastViewport } from "./past-viewport";
+import { applyPastHeight, pastPadding, pastViewport } from "./past-viewport";
 import { editorStyleNonce } from "./editor-style";
 import { diffMarkers, Marker } from "./diff-markers";
 import { previewChanges } from "./preview";
@@ -24,6 +24,7 @@ import {
   highlightActiveLine,
   drawSelection,
 } from "@codemirror/view";
+import { bracketMatching } from "@codemirror/language";
 import {
   history,
   historyKeymap,
@@ -58,7 +59,9 @@ import {
   Document,
   StageRow,
   pairedStageRows,
+  positionAfterReload,
   visible,
+  insertionHighlight,
   visibleInNow,
   changedLineTargets,
   changeAt,
@@ -100,6 +103,7 @@ interface BufferState extends Omit<Document, "text"> {
   revision: number;
   diskDoc: Text;
   diffEpoch: number;
+  confirmedDiff?: DiffUpdate["diff"];
 }
 const wrapConfig = new Compartment();
 const pastWrapConfig = new Compartment();
@@ -205,6 +209,11 @@ let splitUndo = false,
 let quitPending: number | null = null;
 let operationBusy = false;
 let refreshOnIdle = false;
+const matchingBracket = Decoration.mark({ class: "matching-delimiter" });
+const delimiterMatching = bracketMatching({
+  renderMatch: ({ matched, end }) =>
+    matched && end ? [matchingBracket.range(end.from, end.to)] : [],
+});
 const editor = new EditorView({
   parent: $(".now"),
   state: makeState(""),
@@ -219,6 +228,7 @@ const editor = new EditorView({
     if (!b) return;
     for (const tr of trs) {
       if (tr.docChanged) {
+        b.confirmedDiff = undefined;
         b.revision++;
         if (b.selectionDirty) b.selectionInvalid = true;
         b.selection = null;
@@ -266,7 +276,7 @@ const past = new EditorView({
           if (!c && !selected.length) return false;
           e.preventDefault();
           void (selected.length
-            ? restoreMenu(selected, true)
+            ? restoreMenu(selected, "Restore")
             : pastRestoreMenu(c!));
           return true;
         },
@@ -276,6 +286,7 @@ const past = new EditorView({
       EditorView.editable.of(false),
       pastWrapConfig.of(wrap ? EditorView.lineWrapping : []),
       drawSelection(),
+      delimiterMatching,
       EditorView.theme(
         { "&": { backgroundColor: "#2b2b30", color: "#d5d5d8" } },
         { dark: true },
@@ -291,6 +302,7 @@ function makeState(text: string) {
       EditorState.lineSeparator.of("\n"),
       lineNumbers(),
       drawSelection(),
+      delimiterMatching,
       highlightActiveLine(),
       correspondence,
       diffMarkers(decorations, correspondence),
@@ -379,7 +391,7 @@ function makeState(text: string) {
             e.preventDefault();
             void restoreMenu(
               selected.length ? selected : [c!],
-              selected.length > 0,
+              selected.length ? "Discard" : undefined,
             );
           }
           return false;
@@ -449,11 +461,12 @@ function presentDialog(message: string, choices: string[]): Promise<string> {
   });
 }
 let storedPreferences = { wrap, whitespace, font, pastHeight };
-function persist() {
-  pastHeight = Math.max(
-    45,
-    Math.min(pastHeight, Math.max(45, $(".main").clientHeight - 100)),
-  );
+function persist(keepPastLayout = false) {
+  if (!keepPastLayout)
+    pastHeight = Math.max(
+      45,
+      Math.min(pastHeight, Math.max(45, $(".main").clientHeight - 100)),
+    );
   const current = { wrap, whitespace, font, pastHeight };
   try {
     const merged = readPreferences(localStorage);
@@ -467,7 +480,7 @@ function persist() {
   }
   storedPreferences = current;
   document.documentElement.style.setProperty("--font", `${font}px`);
-  $(".past").style.height = "";
+  if (!keepPastLayout) $(".past").style.height = "";
   document.documentElement.style.setProperty("--past", `${pastHeight}px`);
 }
 persist();
@@ -806,10 +819,11 @@ async function loadBuffer(path: string): Promise<BufferState> {
       receive: (result, current) => {
         b.version = result.version;
         if (current && result.head === b.head) {
-          b.changes = result.diff.changes;
-          b.diffEpoch++;
           b.micros = result.diff.micros;
-          if (active === b) applyDiff(b);
+          // Typing already painted the change in the editor transaction.
+          // Keep the exact result for actions that need it, without repainting
+          // either pane when the edit acknowledgement arrives.
+          b.confirmedDiff = result.diff;
         }
       },
       fail,
@@ -822,8 +836,14 @@ async function loadBuffer(path: string): Promise<BufferState> {
     return b;
   });
 }
-function flush(b: BufferState) {
-  return b.sync.flush();
+async function flush(b: BufferState) {
+  await b.sync.flush();
+  const diff = b.confirmedDiff;
+  if (!diff) return;
+  b.confirmedDiff = undefined;
+  b.changes = diff.changes;
+  b.diffEpoch++;
+  if (active === b) applyDiff(b);
 }
 function marks(
   changes: Change[],
@@ -834,8 +854,12 @@ function marks(
   const list = [];
   for (const c of changes) {
     if (!visible(c, base, current, whitespace)) continue;
-    const from = pastSide ? c.a : c.b,
-      to = pastSide ? c.aEnd : c.bEnd;
+    const [from, to] =
+      !pastSide && !whitespace && c.a === c.aEnd
+        ? insertionHighlight(current, c.b, c.bEnd)
+        : pastSide
+          ? [c.a, c.aEnd]
+          : [c.b, c.bEnd];
     if (to > from)
       list.push(
         Decoration.mark({ class: pastSide ? "deletion" : "addition" }).range(
@@ -1150,14 +1174,17 @@ function restore(c?: Change) {
     : changeAt(active.changes, editor.state.selection.main.head);
   if (c) restoreChanges([c]);
 }
-async function restoreMenu(changes: Change[], selection = false) {
+async function restoreMenu(
+  changes: Change[],
+  selection?: "Discard" | "Restore",
+) {
   if (!active) return;
   const buffer = active,
     epoch = active.diffEpoch,
     revision = active.revision;
   const item = await MenuItem.new({
     text: selection
-      ? `Restore ${changes.length} ${changes.length === 1 ? "change" : "changes"}`
+      ? `${selection} ${changes.length} ${changes.length === 1 ? "change" : "changes"}`
       : `Restore '${active.base.slice(changes[0].a, changes[0].aEnd)}'`,
     action: () => {
       if (
@@ -1201,7 +1228,8 @@ async function updateRestoreEnabled() {
 }
 async function save(b = active) {
   if (!b) return;
-  await flush(b);
+  // Saving changes the disk snapshot, not the displayed Git comparison.
+  await b.sync.flush();
   try {
     const d = await invoke<Pick<Document, "disk">>("save_document", {
       path: b.path,
@@ -1238,19 +1266,28 @@ async function resolve(b: BufferState, reload: boolean) {
   const wasLocked = b.locked;
   b.locked = true;
   try {
-    await flush(b);
+    await b.sync.flush();
     const result = await invoke<{
       document: Document;
       diff: DiffUpdate["diff"];
+      reload_changes: Change[] | null;
     }>("resolve_document", {
       path: b.path,
       reload,
       version: b.version,
     });
     const d = result.document;
-    b.changes = result.diff.changes;
-    b.micros = result.diff.micros;
-    b.diffEpoch++;
+    const comparisonChanged =
+      reload ||
+      d.base !== b.base ||
+      d.head !== b.head ||
+      d.baseExists !== b.baseExists;
+    if (comparisonChanged) {
+      b.confirmedDiff = undefined;
+      b.changes = result.diff.changes;
+      b.micros = result.diff.micros;
+      b.diffEpoch++;
+    }
     b.disk = d.disk;
     b.diskDoc = Text.of((d.disk ?? "").split("\n"));
     b.base = d.base;
@@ -1258,17 +1295,35 @@ async function resolve(b: BufferState, reload: boolean) {
     b.head = d.head;
     b.version = d.version;
     let viewport: { top: number; left: number } | undefined;
+    let anchor: { pos: number; offset: number } | undefined;
     if (reload) {
       if (b.selectionDirty) b.selectionInvalid = true;
       b.selection = null;
       b.source = null;
-      const head = b.state.selection.main.head;
+      const oldHead = b.state.selection.main.head;
+      const head = result.reload_changes
+        ? positionAfterReload(result.reload_changes, oldHead)
+        : oldHead;
       if (active === b && mode() === "edit") {
         viewport = {
           top: editor.scrollDOM.scrollTop,
           left: editor.scrollDOM.scrollLeft,
         };
         b.scroll = viewport.top;
+        const bounds = editor.scrollDOM.getBoundingClientRect();
+        const content = editor.contentDOM.getBoundingClientRect();
+        if (bounds.height > 0 && result.reload_changes) {
+          const pos = editor.posAtCoords({
+            x: Math.max(bounds.left, content.left) + 24,
+            y: bounds.top + bounds.height / 2,
+          });
+          const rect = pos === null ? null : editor.coordsAtPos(pos);
+          if (pos !== null && rect)
+            anchor = {
+              pos: positionAfterReload(result.reload_changes, pos),
+              offset: rect.top - bounds.top,
+            };
+        }
       }
       b.state = makeState(d.text);
       b.state = b.state.update({
@@ -1278,11 +1333,21 @@ async function resolve(b: BufferState, reload: boolean) {
       if (active === b) {
         editor.setState(b.state);
         editor.dispatch({
-          effects: wrapConfig.reconfigure(wrap ? EditorView.lineWrapping : []),
+          effects: [
+            wrapConfig.reconfigure(wrap ? EditorView.lineWrapping : []),
+            ...(anchor
+              ? [
+                  EditorView.scrollIntoView(
+                    Math.min(anchor.pos, b.state.doc.length),
+                    { y: "start", yMargin: anchor.offset },
+                  ),
+                ]
+              : []),
+          ],
         });
       }
     }
-    if (active === b) applyDiff(b);
+    if (active === b && comparisonChanged) applyDiff(b);
     if (viewport) {
       const { top, left } = viewport;
       const doc = editor.state.doc;
@@ -1294,7 +1359,7 @@ async function resolve(b: BufferState, reload: boolean) {
         write: (_, view) => {
           if (active !== b || view.state.doc !== doc || mode() !== "edit")
             return;
-          view.scrollDOM.scrollTop = top;
+          if (!anchor) view.scrollDOM.scrollTop = top;
           view.scrollDOM.scrollLeft = left;
         },
       });
@@ -1332,7 +1397,7 @@ async function inspectBuffer(b: BufferState) {
   // Inspection does not block typing. Retry obsolete snapshots and install
   // the baseline and its derived ranges in one synchronous step.
   while (true) {
-    await flush(b);
+    await b.sync.flush();
     const revision = b.revision;
     const d = await invoke<
       Omit<Document, "path" | "text"> & {
@@ -1340,11 +1405,10 @@ async function inspectBuffer(b: BufferState) {
       }
     >("inspect_document", { path: b.path, head: b.head });
     if (revision !== b.revision || d.version !== b.version) continue;
-    if (
-      b.base !== d.base ||
-      b.baseExists !== d.baseExists ||
-      b.head !== d.head
-    ) {
+    const comparisonChanged =
+      b.base !== d.base || b.baseExists !== d.baseExists || b.head !== d.head;
+    if (comparisonChanged) {
+      b.confirmedDiff = undefined;
       if (b.selectionDirty) b.selectionInvalid = true;
       b.selection = null;
       b.source = null;
@@ -1352,12 +1416,12 @@ async function inspectBuffer(b: BufferState) {
     b.base = d.base;
     b.baseExists = d.baseExists;
     b.head = d.head;
-    if (d.diff) {
+    if (comparisonChanged && d.diff) {
       b.changes = d.diff.changes;
       b.micros = d.diff.micros;
       b.diffEpoch++;
     }
-    if (active === b && d.diff) applyDiff(b);
+    if (active === b && comparisonChanged && d.diff) applyDiff(b);
     if (d.disk !== b.disk) {
       if (dirty(b)) {
         const c = await choose(
@@ -2136,24 +2200,52 @@ $("#quick-query").onkeydown = (e) => {
 $("#summary").addEventListener("input", updateCommitButtons);
 $("#stage-selected").onclick = () => void stage().catch(fail);
 $("#commit").onclick = () => void commit().catch(fail);
-$(".divider").onpointerdown = (e) => {
-  const start = e.clientY,
-    height = pastHeight;
+const divider = $(".divider");
+divider.onpointerdown = (e) => {
+  if (e.button !== 0 || !e.isPrimary) return;
+  e.preventDefault();
+  const start = e.clientY;
+  const line = past.defaultLineHeight;
+  const padding = pastPadding(past);
+  const initialRows = Math.max(
+    1,
+    Math.round(past.dom.getBoundingClientRect().height / line),
+  );
+  const minRows = Math.min(
+    initialRows,
+    Math.max(1, Math.ceil((45 - padding) / line)),
+  );
+  const maxRows = Math.max(
+    minRows,
+    Math.floor(($(".main").clientHeight - 100 - padding) / line),
+  );
+  let rows = initialRows;
   document.body.classList.add("resizing");
-  $(".divider").setPointerCapture(e.pointerId);
-  $(".divider").onpointermove = (e) => {
-    pastHeight = Math.max(
-      45,
-      Math.min($(".main").clientHeight - 100, height + e.clientY - start),
+  divider.setPointerCapture(e.pointerId);
+  divider.onpointermove = (move) => {
+    if (move.pointerId !== e.pointerId) return;
+    const next = Math.max(
+      minRows,
+      Math.min(
+        Math.max(maxRows, initialRows),
+        initialRows + Math.round((move.clientY - start) / line),
+      ),
     );
-    $(".past").style.height = "";
+    if (next === rows) return;
+    rows = next;
+    pastHeight = rows * line + padding;
     document.documentElement.style.setProperty("--past", `${pastHeight}px`);
+    applyPastHeight(past, rows * line, pastHeight);
   };
-  $(".divider").onpointercancel = $(".divider").onpointerup = () => {
-    document.body.classList.remove("resizing");
-    $(".divider").onpointermove = null;
-    persist();
-  };
+  divider.onlostpointercapture =
+    divider.onpointercancel =
+    divider.onpointerup =
+      (end) => {
+        if (end.pointerId !== e.pointerId || !divider.onpointermove) return;
+        document.body.classList.remove("resizing");
+        divider.onpointermove = null;
+        persist(true);
+      };
 };
 // Capture before CodeMirror's default bindings (Cmd+] otherwise indents).
 document.addEventListener(

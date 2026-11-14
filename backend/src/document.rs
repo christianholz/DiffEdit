@@ -27,6 +27,7 @@ pub struct Inspection {
 pub struct Resolved {
     pub document: Document,
     pub diff: diff::DiffResult,
+    pub reload_changes: Option<Vec<diff::Change>>,
 }
 #[derive(Serialize)]
 pub struct Saved {

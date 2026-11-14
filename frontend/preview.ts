@@ -72,6 +72,25 @@ export function previewChanges(
       )
         right++;
       if (right && /[\uDC00-\uDFFF]/.test(old[old.length - right])) right--;
+      // A single common letter at a word edge is weak evidence that the
+      // words match. Keep it highlighted with the rest of the replacement.
+      const word = /[\p{L}\p{N}\p{M}_]/u;
+      if (
+        left === 1 &&
+        word.test(old[0]) &&
+        (word.test(old[1] ?? "") || word.test(now[1] ?? "")) &&
+        Math.max(old.length, now.length) >= 4 &&
+        right < 2
+      )
+        left = 0;
+      if (
+        right === 1 &&
+        word.test(old.at(-1) ?? "") &&
+        (word.test(old.at(-2) ?? "") || word.test(now.at(-2) ?? "")) &&
+        Math.max(old.length, now.length) >= 4 &&
+        left < 2
+      )
+        right = 0;
       return {
         a: c.a + left,
         aEnd: c.aEnd - right,

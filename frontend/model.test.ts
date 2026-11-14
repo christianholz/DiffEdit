@@ -4,10 +4,25 @@ import {
   basePosition,
   changeAt,
   changedLineTargets,
+  insertionHighlight,
   pairedStageRows,
+  positionAfterReload,
   wordRange,
   visible,
 } from "./model";
+
+test("reload follows matching text through insertions, replacements and deletions", () => {
+  const changes = [
+    { a: 0, aEnd: 0, b: 0, bEnd: 8 },
+    { a: 12, aEnd: 17, b: 20, bEnd: 22 },
+    { a: 23, aEnd: 27, b: 28, bEnd: 28 },
+  ];
+  assert.equal(positionAfterReload(changes, 0), 8);
+  assert.equal(positionAfterReload(changes, 10), 18);
+  assert.equal(positionAfterReload(changes, 16), 22);
+  assert.equal(positionAfterReload(changes, 25), 28);
+  assert.equal(positionAfterReload(changes, 30), 31);
+});
 import type { StageRow } from "./model";
 
 test("commit review pairs replacements within each hunk and keeps row identities", () => {
@@ -72,6 +87,20 @@ test("one alignment drives equal text, replacement edges and pure insertions", (
 
 import { EditorState } from "@codemirror/state";
 import { previewChanges } from "./preview";
+test("inserted phrases paint their words but not surrounding separators", () => {
+  const { doc } = EditorState.create({ doc: "before \tnew words \nafter" });
+  assert.deepEqual(insertionHighlight(doc, 6, 19), [8, 17]);
+});
+
+test("typing a replacement does not leave an isolated matching letter", () => {
+  const tr = EditorState.create({ doc: "x" }).update({
+    changes: { from: 0, to: 1, insert: "cornflower" },
+  });
+  assert.deepEqual(
+    previewChanges([{ a: 0, aEnd: 4, b: 0, bEnd: 1 }], "card", tr),
+    [{ a: 0, aEnd: 4, b: 0, bEnd: 10 }],
+  );
+});
 test("immediate ranges survive typing, reverting, whitespace edges and multiple cursors", () => {
   const cases = [
     {

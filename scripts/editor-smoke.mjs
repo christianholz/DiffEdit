@@ -42,6 +42,7 @@ let inspectionGate = null;
 let startupFolder = null;
 let startupReads = 0;
 let stageRowCount = 2;
+let broadenNextDiff = false;
 let divergedStage = false;
 let failNextRefresh = false,
   failInspections = false;
@@ -231,6 +232,12 @@ mockIPC(
       for (const e of args.edits.toReversed())
         text = text.slice(0, e.from) + e.insert + text.slice(e.to);
       version++;
+      if (broadenNextDiff) {
+        broadenNextDiff = false;
+        const update = diff();
+        update.diff.changes[0].a = update.diff.changes[0].b = 0;
+        return update;
+      }
       return diff();
     }
     if (cmd === "save_document") {
@@ -356,6 +363,54 @@ try {
   assert.equal(app.menuAvailability().find, true);
   assert.equal(app.menuAvailability().save, false);
   assert.equal(app.menuAvailability().undo, false);
+  {
+    const divider = document.querySelector(".divider");
+    const pane = document.querySelector(".past");
+    const main = document.querySelector(".main");
+    const line = app.past.defaultLineHeight;
+    const rect = app.past.dom.getBoundingClientRect;
+    Object.defineProperty(main, "clientHeight", {
+      configurable: true,
+      value: 820,
+    });
+    app.past.dom.getBoundingClientRect = () => ({ height: 4 * line });
+    pane.style.height = app.past.dom.style.height = `${4 * line}px`;
+    divider.setPointerCapture = () => {};
+    const pointer = (clientY) => ({ pointerId: 1, clientY });
+    divider.onpointerdown({
+      ...pointer(100),
+      button: 0,
+      isPrimary: true,
+      preventDefault() {},
+    });
+    divider.onpointermove(pointer(100 + line * 0.49));
+    assert.equal(pane.style.height, `${4 * line}px`);
+    divider.onpointermove(pointer(100 + line * 0.51));
+    assert.equal(pane.style.height, `${5 * line}px`);
+    divider.onpointermove(pointer(100 + line * 0.8));
+    divider.onpointerup(pointer(100 + line * 0.8));
+    assert.equal(pane.style.height, `${5 * line}px`);
+    assert.equal(document.body.classList.contains("resizing"), false);
+    app.past.dom.getBoundingClientRect = rect;
+    delete main.clientHeight;
+  }
+  {
+    const end = app.editor.state.doc.length;
+    app.editor.dispatch({ changes: { from: end, insert: "([x])" } });
+    app.editor.dispatch({ selection: { anchor: end + 2 } });
+    assert.equal(
+      document.querySelector(".now .matching-delimiter")?.textContent,
+      "]",
+    );
+    app.editor.dispatch({ selection: { anchor: end + 5 } });
+    assert.equal(
+      document.querySelector(".now .matching-delimiter")?.textContent,
+      "(",
+    );
+    await app.action("undo");
+    await app.flush(app.active);
+    assert.equal(app.editor.state.doc.toString(), base);
+  }
   for (const char of "word") {
     app.editor.dispatch({
       changes: { from: app.editor.state.doc.length, insert: char },
@@ -376,6 +431,42 @@ try {
   await app.flush(app.buffers.get("fixture.tex"));
   assert.equal(app.editor.state.field(app.decorations), greenBeforeAck);
   assert.equal(text, base + "word");
+  broadenNextDiff = true;
+  app.editor.dispatch({
+    changes: { from: app.editor.state.doc.length, insert: "!" },
+    annotations: Transaction.userEvent.of("input.type"),
+  });
+  const typingMarks = app.editor.state.field(app.decorations);
+  const pastTypingMarks = app.past.state.field(app.decorations);
+  await app.active.sync.flush();
+  const confirmedVersion = version;
+  app.editor.contentDOM.dispatchEvent(
+    new KeyboardEvent("keyup", {
+      key: "!",
+      bubbles: true,
+    }),
+  );
+  await app.active.sync.flush();
+  assert.equal(version, confirmedVersion, "keyup must not send a second edit");
+  assert.equal(app.editor.state.field(app.decorations), typingMarks);
+  assert.equal(app.past.state.field(app.decorations), pastTypingMarks);
+  await app.save();
+  assert.equal(disk, base + "word!");
+  assert.equal(app.editor.state.field(app.decorations), typingMarks);
+  assert.equal(app.past.state.field(app.decorations), pastTypingMarks);
+  await app.action("undo");
+  await app.flush(app.active);
+  await app.action("redo");
+  await app.flush(app.active);
+  assert.equal(text, base + "word!");
+  // Restore the original fixture for the remaining undo/navigation checks.
+  await app.action("undo");
+  await app.flush(app.active);
+  app.editor.dispatch({
+    changes: { from: base.length, insert: "word" },
+    annotations: Transaction.userEvent.of("input.type"),
+  });
+  await app.flush(app.active);
   await app.action("undo");
   await app.flush(app.buffers.get("fixture.tex"));
   assert.equal(app.editor.state.doc.toString(), base);

@@ -5,6 +5,16 @@ export interface Change {
   b: number;
   bEnd: number;
 }
+export function positionAfterReload(changes: Change[], pos: number) {
+  let delta = 0;
+  for (const change of changes) {
+    if (pos < change.a) break;
+    if (pos < change.aEnd)
+      return change.b + Math.min(pos - change.a, change.bEnd - change.b);
+    delta = change.bEnd - change.aEnd;
+  }
+  return pos + delta;
+}
 export interface Diff {
   changes: Change[];
   micros: number;
@@ -86,6 +96,28 @@ export function visible(
   for (const chunk of current.iterRange(c.b, c.bEnd))
     if (/\S/u.test(chunk)) return true;
   return false;
+}
+/** Keep separators in the actual edit, but paint only the inserted content. */
+export function insertionHighlight(
+  doc: Text,
+  from: number,
+  to: number,
+): [number, number] {
+  for (const chunk of doc.iterRange(from, to)) {
+    const first = chunk.search(/\S/u);
+    if (first >= 0) {
+      from += first;
+      break;
+    }
+    from += chunk.length;
+  }
+  if (from === to) return [from, to];
+  for (const chunk of doc.iterRange(to, from)) {
+    const trailing = chunk.match(/\s*$/u)![0].length;
+    to -= trailing;
+    if (trailing < chunk.length) break;
+  }
+  return [from, to];
 }
 // A deletion marker has no changed text to land on in the current editor.
 export function visibleInNow(

@@ -134,10 +134,17 @@ fn group_phrases(changes: Vec<Change>, a: &str, b: &str) -> Vec<Change> {
         if let Some((last, _, lae, _, lbe, last_multiline)) = grouped.last_mut() {
             let ag = &a[*lae..aa];
             let bg = &b[*lbe..bb];
+            let mut letters = ag.trim().chars();
+            let weak_anchor = letters.next().is_some_and(char::is_alphabetic)
+                && letters.next().is_none()
+                && !ag.contains(['\n', '\r'])
+                && ((last.a_end - last.a) + (c.a_end - c.a))
+                    .max((last.b_end - last.b) + (c.b_end - c.b))
+                    >= 8;
             if !*last_multiline
                 && !multiline
                 && ag == bg
-                && ag.chars().all(|c| c == ' ' || c == '\t')
+                && (weak_anchor || ag.chars().all(|c| c == ' ' || c == '\t'))
             {
                 last.a_end = c.a_end;
                 last.b_end = c.b_end;
@@ -602,6 +609,14 @@ pub fn benchmark(paths: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod regression_tests {
     use super::*;
+    #[test]
+    fn unrelated_phrases_do_not_keep_a_single_letter_anchor() {
+        let a = "We saw an otter a long time ago.";
+        let b = "We saw an elephant a fortnight ago.";
+        let result = compute(a, b);
+        assert_eq!(result.changes.len(), 1);
+        aligned(a, b);
+    }
     fn aligned(a: &str, b: &str) {
         let d = compute(a, b);
         let (mut x, mut y) = (0, 0);

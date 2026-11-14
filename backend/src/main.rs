@@ -523,14 +523,22 @@ async fn resolve_document(
             return Err("Document changed before reload".into());
         }
         d.disk = disk;
-        if reload {
-            d.text = d.disk.clone().unwrap_or_default();
+        let old_text = if reload {
+            let previous = std::mem::replace(&mut d.text, d.disk.clone().unwrap_or_default());
             d.version += 1;
-        }
+            Some(previous)
+        } else {
+            None
+        };
         let document = d.clone();
         drop(w);
         let diff = diff::compute(&document.base, &document.text);
-        Ok(Resolved { document, diff })
+        let reload_changes = old_text.map(|old| diff::compute(&old, &document.text).changes);
+        Ok(Resolved {
+            document,
+            diff,
+            reload_changes,
+        })
     })
     .await
 }
